@@ -29,7 +29,8 @@ void ResourceLoader::RegisterGlobalResourceFactories() {
 }
 
 bool ResourceLoader::RegisterResourceFactory(std::shared_ptr<ResourceFactory> factory, uint32_t format,
-                                             std::string typeName, uint32_t type, uint32_t version) {
+                                             std::string typeName, uint32_t type, uint32_t version,
+                                             bool allowOverwrite) {
     if (mResourceTypes.contains(typeName)) {
         if (mResourceTypes[typeName] != type) {
             SPDLOG_ERROR("Failed to register resource factory: conflicting types for name {}", typeName);
@@ -41,6 +42,11 @@ bool ResourceLoader::RegisterResourceFactory(std::shared_ptr<ResourceFactory> fa
 
     ResourceFactoryKey key{ .resourceFormat = format, .resourceType = type, .resourceVersion = version };
     if (mFactories.contains(key)) {
+        if (allowOverwrite) {
+            SPDLOG_INFO("Replacing resource factory for key {}{}{}", format, type, version);
+            mFactories[key] = factory;
+            return true;
+        }
         SPDLOG_ERROR("Failed to register resource factory: factory with key {}{}{} already exists", format, type,
                      version);
         return false;

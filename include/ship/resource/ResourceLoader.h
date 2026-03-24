@@ -35,7 +35,7 @@ class ResourceLoader {
     std::shared_ptr<IResource> LoadResource(std::string filePath, std::shared_ptr<File> fileToLoad,
                                             std::shared_ptr<ResourceInitData> initData = nullptr);
     bool RegisterResourceFactory(std::shared_ptr<ResourceFactory> factory, uint32_t format, std::string typeName,
-                                 uint32_t type, uint32_t version);
+                                 uint32_t type, uint32_t version, bool allowOverwrite = false);
 
     uint32_t GetResourceType(const std::string& type);
 
