@@ -70,6 +70,10 @@ void CVarClear(const char* name) {
     Ship::Context::GetInstance()->GetConsoleVariables()->ClearVariable(name);
 }
 
+bool CVarExists(const char* name) {
+    return Ship::Context::GetInstance()->GetConsoleVariables()->Get(name) != nullptr;
+}
+
 void CVarClearBlock(const char* name) {
     Ship::Context::GetInstance()->GetConsoleVariables()->ClearBlock(name);
 }
