@@ -90,6 +90,11 @@ bool OtrArchive::Open() {
     // Generate the file list by reading the list file.
     // This can also be done via the StormLib API, but this was copied from the LUS1.x implementation in GenerateCrcMap.
     auto listFile = LoadFile("(listfile)");
+    if (listFile == nullptr || listFile->Buffer == nullptr) {
+        SPDLOG_ERROR("Failed to read the (listfile) of mpq \"{}\"", GetPath());
+        Close();
+        return false;
+    }
 
     // Use std::string_view to avoid unnecessary string copies
     std::vector<std::string_view> lines =
@@ -112,9 +117,14 @@ bool OtrArchive::Close() {
     bool closed = SFileCloseArchive(mHandle);
     if (!closed) {
         SPDLOG_ERROR("({}) Failed to close mpq {}", GetLastError(), mHandle);
+        return false;
     }
 
-    return closed;
+    // Drop the handle, exactly as O2rArchive::Close drops its zip_t. Without this the
+    // "archive not open" guard in LoadFile above can never fire after an Unload, and a
+    // load racing a hotswap reads through a freed StormLib handle.
+    mHandle = nullptr;
+    return true;
 }
 
 bool OtrArchive::WriteFile(const std::string& filename, const std::vector<uint8_t>& data) {
