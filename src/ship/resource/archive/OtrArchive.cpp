@@ -19,6 +19,11 @@ OtrArchive::~OtrArchive() {
 }
 
 std::shared_ptr<File> OtrArchive::LoadFile(const std::string& filePath) {
+    // Serialize all operations on the shared mpq handle: StormLib reads seek the archive's one
+    // underlying stream, and this method runs concurrently on resource-pool workers and the
+    // render thread.
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     if (mHandle == nullptr) {
         SPDLOG_TRACE("Failed to open file {} from mpq archive {}. Archive not open.", filePath, GetPath());
         return nullptr;
@@ -68,13 +73,18 @@ std::shared_ptr<File> OtrArchive::LoadFile(uint64_t hash) {
 }
 
 bool OtrArchive::Open() {
-    const bool opened = SFileOpenArchive(GetPath().c_str(), 0, MPQ_OPEN_READ_ONLY, &mHandle);
-    if (opened) {
-        SPDLOG_INFO("Opened mpq file \"{}\"", GetPath());
-    } else {
-        SPDLOG_ERROR("Failed to load mpq file \"{}\"", GetPath());
-        mHandle = nullptr;
-        return false;
+    {
+        // Scoped so the lock is released before LoadFile below re-acquires it.
+        const std::lock_guard<std::mutex> lock(mMutex);
+
+        const bool opened = SFileOpenArchive(GetPath().c_str(), 0, MPQ_OPEN_READ_ONLY, &mHandle);
+        if (opened) {
+            SPDLOG_INFO("Opened mpq file \"{}\"", GetPath());
+        } else {
+            SPDLOG_ERROR("Failed to load mpq file \"{}\"", GetPath());
+            mHandle = nullptr;
+            return false;
+        }
     }
 
     // Generate the file list by reading the list file.
@@ -93,10 +103,12 @@ bool OtrArchive::Open() {
         IndexFile(lineStr);
     }
 
-    return opened;
+    return true;
 }
 
 bool OtrArchive::Close() {
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     bool closed = SFileCloseArchive(mHandle);
     if (!closed) {
         SPDLOG_ERROR("({}) Failed to close mpq {}", GetLastError(), mHandle);

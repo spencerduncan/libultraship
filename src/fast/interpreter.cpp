@@ -2511,6 +2511,10 @@ void Interpreter::Gfxs2dexBgCopy(F3DuObjBg* bg) {
     if ((bool)gfx_check_image_signature((char*)data)) {
         std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
             Ship::Context::GetInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
+        if (tex == nullptr) {
+            SPDLOG_ERROR("G_BG_COPY: Texture is null: {}", (char*)data);
+            return;
+        }
         texFlags = tex->Flags;
         rawTexMetadata.width = tex->Width;
         rawTexMetadata.height = tex->Height;
@@ -2548,6 +2552,10 @@ void Interpreter::Gfxs2dexBg1cyc(F3DuObjBg* bg) {
     if ((bool)gfx_check_image_signature((char*)data)) {
         std::shared_ptr<Fast::Texture> tex = std::static_pointer_cast<Fast::Texture>(
             Ship::Context::GetInstance()->GetResourceManager()->LoadResourceProcess((char*)data));
+        if (tex == nullptr) {
+            SPDLOG_ERROR("G_BG_1CYC: Texture is null: {}", (char*)data);
+            return;
+        }
         texFlags = tex->Flags;
         rawTexMetadata.width = tex->Width;
         rawTexMetadata.height = tex->Height;
