@@ -20,6 +20,10 @@ std::shared_ptr<File> O2rArchive::LoadFile(uint64_t hash) {
 }
 
 std::shared_ptr<File> O2rArchive::LoadFile(const std::string& filePath) {
+    // Serialize all operations on the shared zip_t: libzip is not thread-safe per handle, and
+    // this method runs concurrently on resource-pool workers and the render thread.
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     if (mZipArchive == nullptr) {
         SPDLOG_TRACE("Failed to open file {} from zip archive {}. Archive not open.", filePath, GetPath());
         return nullptr;
@@ -67,6 +71,8 @@ std::shared_ptr<File> O2rArchive::LoadFile(const std::string& filePath) {
 }
 
 bool O2rArchive::Open() {
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     mZipArchive = zip_open(GetPath().c_str(), ZIP_CREATE, nullptr);
     if (mZipArchive == nullptr) {
         SPDLOG_ERROR("Failed to load zip file \"{}\"", GetPath());
@@ -90,6 +96,8 @@ bool O2rArchive::Open() {
 }
 
 bool O2rArchive::Close() {
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     if (mZipArchive == nullptr) {
         SPDLOG_ERROR("Cannot close zip file. Zip file not loaded. \"{}\"", GetPath());
         return false;
@@ -105,6 +113,8 @@ bool O2rArchive::Close() {
 }
 
 bool O2rArchive::WriteFile(const std::string& filePath, const std::vector<uint8_t>& data) {
+    const std::lock_guard<std::mutex> lock(mMutex);
+
     if (!mZipArchive) {
         SPDLOG_ERROR("Cannot write to zip: Archive is not open.");
         return false;
