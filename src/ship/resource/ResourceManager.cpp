@@ -141,6 +141,10 @@ std::shared_ptr<IResource> ResourceManager::LoadResourceProcess(const ResourceId
     auto file = LoadFileProcess(identifier.Path);
     if (file == nullptr) {
         SPDLOG_TRACE("Failed to load resource file at path {}", identifier.Path);
+        // mMutex, like every other write to mResourceCache below: this negative-cache
+        // write runs on any thread that reaches a missing (or transiently unreadable)
+        // path, concurrently with the locked find/insert/erase elsewhere in this class.
+        const std::lock_guard<std::mutex> lock(mMutex);
         mResourceCache[identifier] = ResourceLoadError::NotFound;
         return nullptr;
     }
@@ -392,13 +396,20 @@ std::shared_ptr<ResourceLoader> ResourceManager::GetResourceLoader() {
 size_t ResourceManager::UnloadResource(const ResourceIdentifier& identifier) {
     // Store a shared pointer here so that erase doesn't destruct the resource.
     // The resource will attempt to load other resources on the destructor, and this will fail because we already hold
-    // the mutex.
+    // the mutex. So the cache line is moved out under the lock and destructed after it is released.
     std::variant<ResourceLoadError, std::shared_ptr<IResource>> value = nullptr;
     size_t ret = 0;
-    // We can only erase the resource if we have any resources for that owner.
-    if (mResourceCache.contains(identifier)) {
+    {
+        // The whole lookup, not just the erase: mResourceCache is an unordered_map that
+        // other threads insert into under this same mutex, so an unguarded contains()
+        // can observe a rehash in progress.
         const std::lock_guard<std::mutex> lock(mMutex);
-        mResourceCache.erase(identifier);
+
+        auto cacheFind = mResourceCache.find(identifier);
+        if (cacheFind != mResourceCache.end()) {
+            value = std::move(cacheFind->second);
+            mResourceCache.erase(cacheFind);
+        }
     }
 
     return ret;
