@@ -1,6 +1,8 @@
 #ifdef ENABLE_OPENGL
 #pragma once
 
+#include <vector>
+
 #include "gfx_rendering_api.h"
 #include "../interpreter.h"
 
@@ -101,13 +103,24 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     void SetPerDrawUniforms();
 
     struct TextureInfo {
-        uint16_t width;
-        uint16_t height;
-        uint16_t filtering;
-    } textures[1024];
+        uint16_t width = 0;
+        uint16_t height = 0;
+        uint16_t filtering = 0;
+    };
 
-    GLuint mCurrentTextureIds[SHADER_MAX_TEXTURES];
-    uint8_t mCurrentTile;
+    // Indexed by the raw GL texture name returned by glGenTextures(), which the
+    // driver may hand out without any upper bound. This used to be a fixed
+    // TextureInfo[1024]; once names passed 1024 the three write sites below
+    // scribbled straight through the end of the array into this object's own
+    // following members (mCurrentTextureIds first, then mShaderProgramPool),
+    // which is the corruption behind the gameplay-soak access violations.
+    // GfxRenderingAPIDX11 already keeps its texture metadata in a std::vector;
+    // this matches it. TextureEntry() grows on demand.
+    TextureInfo& TextureEntry(GLuint id);
+    std::vector<TextureInfo> mTextures;
+
+    GLuint mCurrentTextureIds[SHADER_MAX_TEXTURES] = {};
+    uint8_t mCurrentTile = 0;
 
     std::map<std::pair<uint64_t, uint32_t>, ShaderProgram> mShaderProgramPool;
     ShaderProgram* mCurrentShaderProgram;
