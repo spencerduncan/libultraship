@@ -59,15 +59,27 @@ void GfxRenderingAPIOGL::SetUniforms(ShaderProgram* prg) const {
     glUniform1f(prg->noiseScaleLocation, mCurrentNoiseScale);
 }
 
+GfxRenderingAPIOGL::TextureInfo& GfxRenderingAPIOGL::TextureEntry(GLuint id) {
+    if (id >= mTextures.size()) {
+        mTextures.resize(static_cast<size_t>(id) + 1);
+    }
+    return mTextures[id];
+}
+
 void GfxRenderingAPIOGL::SetPerDrawUniforms() {
     if (mCurrentShaderProgram->usedTextures[0] || mCurrentShaderProgram->usedTextures[1]) {
-        GLint filtering[2] = { textures[mCurrentTextureIds[0]].filtering, textures[mCurrentTextureIds[1]].filtering };
+        // Copies, not references: the second TextureEntry() call can reallocate
+        // and would dangle a reference taken from the first.
+        const TextureInfo tex0 = TextureEntry(mCurrentTextureIds[0]);
+        const TextureInfo tex1 = TextureEntry(mCurrentTextureIds[1]);
+
+        GLint filtering[2] = { tex0.filtering, tex1.filtering };
         glUniform1iv(mCurrentShaderProgram->texture_filtering_location, 2, filtering);
 
-        GLint width[2] = { textures[mCurrentTextureIds[0]].width, textures[mCurrentTextureIds[1]].width };
+        GLint width[2] = { tex0.width, tex1.width };
         glUniform1iv(mCurrentShaderProgram->texture_width_location, 2, width);
 
-        GLint height[2] = { textures[mCurrentTextureIds[0]].height, textures[mCurrentTextureIds[1]].height };
+        GLint height[2] = { tex0.height, tex1.height };
         glUniform1iv(mCurrentShaderProgram->texture_height_location, 2, height);
     }
 }
@@ -533,12 +545,15 @@ void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
     glBindTexture(GL_TEXTURE_2D, texture_id);
     mCurrentTextureIds[tile] = texture_id;
     mCurrentTile = tile;
+    // Reserve the metadata slot here so the per-draw read path never has to grow.
+    TextureEntry(texture_id);
 }
 
 void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
-    textures[mCurrentTextureIds[mCurrentTile]].width = width;
-    textures[mCurrentTextureIds[mCurrentTile]].height = height;
+    TextureInfo& tex = TextureEntry(mCurrentTextureIds[mCurrentTile]);
+    tex.width = width;
+    tex.height = height;
 }
 
 #ifdef USE_OPENGLES
@@ -564,7 +579,7 @@ void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint
     const GLint filter = linear_filter && mCurrentFilterMode == FILTER_LINEAR ? GL_LINEAR : GL_NEAREST;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-    textures[mCurrentTextureIds[tile]].filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
+    TextureEntry(mCurrentTextureIds[tile]).filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));
 }
