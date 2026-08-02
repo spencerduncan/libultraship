@@ -48,12 +48,19 @@ std::shared_ptr<File> ArchiveManager::LoadFile(const std::string& filePath) {
 }
 
 std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
-    auto archive = mFileToArchive[hash];
-    if (archive == nullptr) {
+    // find(), NOT operator[]: this is a pure lookup. operator[] default-inserts
+    // a null mapped_type on a miss, and HasFile() below answers from
+    // mFileToArchive.count(), so a single failed load would make HasFile()
+    // report true for that hash for the rest of the process lifetime (and grow
+    // the map by one entry per distinct miss). Callers that probe-then-load --
+    // the common shape -- would then take the "the file exists" branch and get
+    // a null File back.
+    auto it = mFileToArchive.find(hash);
+    if (it == mFileToArchive.end() || it->second == nullptr) {
         return nullptr;
     }
 
-    return archive->LoadFile(hash);
+    return it->second->LoadFile(hash);
 }
 
 bool ArchiveManager::HasFile(const std::string& filePath) {
@@ -65,7 +72,16 @@ bool ArchiveManager::HasFile(uint64_t hash) {
 }
 
 std::shared_ptr<Archive> ArchiveManager::GetArchiveFromFile(const std::string& filePath) {
-    return mFileToArchive[CRC64(filePath.c_str())];
+    // Same reasoning as LoadFile(uint64_t): a lookup must not mutate the map.
+    // This one is called per binary-resource read by ports that need to know
+    // which archive owns a path, so an operator[] here poisoned HasFile() for
+    // every path that legitimately is not in any mounted archive.
+    auto it = mFileToArchive.find(CRC64(filePath.c_str()));
+    if (it == mFileToArchive.end()) {
+        return nullptr;
+    }
+
+    return it->second;
 }
 
 std::shared_ptr<std::vector<std::string>> ArchiveManager::ListFiles(const std::string& searchMask) {
