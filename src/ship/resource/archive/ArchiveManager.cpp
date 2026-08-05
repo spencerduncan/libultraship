@@ -159,6 +159,14 @@ void ArchiveManager::ResetVirtualFileSystem() {
     mGameVersions.clear();
     mHashes.clear();
     mFileToArchive.clear();
+    // mDirectories too: AddArchive() populates exactly these five members, so every one of them has
+    // to be dropped here or the rebuild is not a rebuild. Leaving this one behind made
+    // ListDirectories() report directories out of archives that are no longer mounted, permanently
+    // -- RemoveArchive() and SetArchives() both rebuild through here, and an unordered_set only ever
+    // grew. mValidGameVersions is deliberately NOT cleared: it is a policy input from Init(), not
+    // state derived from the mounted archives, and clearing it would silently drop the game-version
+    // whitelist that AddArchive() filters on.
+    mDirectories.clear();
     for (const auto& archive : archives) {
         archive->Unload();
         archive->Load();
