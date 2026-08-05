@@ -55,6 +55,32 @@ namespace Ship {
 
 static Ship::Coords mPrevMousePos;
 
+namespace {
+// Registering a GUI texture under a name that is already taken used to overwrite the map entry and
+// drop the old GuiTextureMetadata on the floor, which leaked the renderer texture it named -- the GL
+// name itself and the GPU memory behind it -- for the rest of the process. UnloadTexture() is the
+// only place that ever called DeleteTexture(), and none of the load paths go through it.
+//
+// A host that runs one port registers each name once at startup, so upstream never sees this. A host
+// that hosts two ports in one process re-registers the shared names (both ports' input viewers use
+// "A-Btn", "B-Btn", ... and both register "Game_Icon") on every switch between them, so the same
+// handful of names churn for the whole session.
+//
+// Free the outgoing texture before recording the new one. Guarded against the degenerate case where
+// the caller hands back the id already stored under this name -- that must update the metadata in
+// place, never delete the texture it is about to publish.
+void ReplaceGuiTexture(std::unordered_map<std::string, GuiTextureMetadata>& guiTextures, Fast::GfxRenderingAPI* api,
+                       const std::string& name, const GuiTextureMetadata& metadata) {
+    auto existing = guiTextures.find(name);
+    if (existing != guiTextures.end() && existing->second.RendererTextureId != metadata.RendererTextureId &&
+        api != nullptr) {
+        api->DeleteTexture(existing->second.RendererTextureId);
+    }
+
+    guiTextures[name] = metadata;
+}
+} // namespace
+
 Gui::Gui(std::vector<std::shared_ptr<GuiWindow>> guiWindows) : mNeedsConsoleVariableSave(false) {
     mGameOverlay = std::make_shared<GameOverlay>();
 
@@ -261,13 +287,12 @@ void Gui::LoadTextureFromRawImage(const std::string& name, const std::string& pa
 
     Fast::GfxRenderingAPI* api = mInterpreter.lock()->GetCurrentRenderingAPI();
 
-    // TODO: Nothing ever unloads the texture from Fast3D here.
     guiTexture->Metadata.RendererTextureId = api->NewTexture();
     api->SelectTexture(0, guiTexture->Metadata.RendererTextureId);
     api->SetSamplerParameters(0, false, 0, 0);
     api->UploadTexture(guiTexture->Data, guiTexture->Metadata.Width, guiTexture->Metadata.Height);
 
-    mGuiTextures[name] = guiTexture->Metadata;
+    ReplaceGuiTexture(mGuiTextures, api, name, guiTexture->Metadata);
 }
 
 bool Gui::SupportsViewports() {
@@ -1043,7 +1068,7 @@ void Gui::LoadGuiTexture(const std::string& name, const Fast::Texture& res, cons
     api->SetSamplerParameters(0, false, 0, 0);
     api->UploadTexture(texBuffer.data(), res.Width, res.Height);
 
-    mGuiTextures[name] = asset;
+    ReplaceGuiTexture(mGuiTextures, api, name, asset);
 }
 
 void Gui::LoadGuiTexture(const std::string& name, const std::string& path, const ImVec4& tint) {

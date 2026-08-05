@@ -538,6 +538,17 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
 
 void GfxRenderingAPIOGL::DeleteTexture(uint32_t texID) {
     glDeleteTextures(1, &texID);
+
+    // glDeleteTextures() returns the name to the driver's free pool, so the very next glGenTextures()
+    // may hand it straight back. mTextures is keyed by that raw name, so clear the slot here rather
+    // than letting the reused name inherit the dead texture's width/height/filtering. Every load path
+    // does overwrite all three before the next draw, but only because it happens to; nothing enforces
+    // it, and a stale non-zero width read through SetPerDrawUniforms is silently wrong rather than
+    // loud. Bounds-checked instead of TextureEntry() so deleting a never-uploaded name cannot grow
+    // the vector.
+    if (texID < mTextures.size()) {
+        mTextures[texID] = TextureInfo{};
+    }
 }
 
 void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
