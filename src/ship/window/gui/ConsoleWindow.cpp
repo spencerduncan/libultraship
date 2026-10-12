@@ -6,6 +6,7 @@
 #include "ship/utils/StringHelper.h"
 #include "ship/utils/Utils.h"
 #include <sstream>
+#include <stdexcept>
 
 namespace Ship {
 
@@ -202,20 +203,40 @@ int32_t ConsoleWindow::SetCommand(std::shared_ptr<Console> console, const std::v
 
     int vType = CheckVarType(args[2]);
 
-    if (vType == VARTYPE_STRING) {
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetString(args[1].c_str(), args[2].c_str());
-    } else if (vType == VARTYPE_FLOAT) {
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetFloat((char*)args[1].c_str(), std::stof(args[2]));
-    } else if (vType == VARTYPE_RGBA) {
-        uint32_t val = std::stoul(&args[2].c_str()[1], nullptr, 16);
-        Color_RGBA8 clr;
-        clr.r = val >> 24;
-        clr.g = val >> 16;
-        clr.b = val >> 8;
-        clr.a = val & 0xFF;
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetColor((char*)args[1].c_str(), clr);
-    } else {
-        Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger(args[1].c_str(), std::stoi(args[2]));
+    // CheckVarType classifies by character set only, so a value it calls a number can still fail to parse: `.` (stof),
+    // `#` or `#zz` (stoul) throw std::invalid_argument, and `99999999999` (stoi) or a hex colour past unsigned long
+    // throw std::out_of_range. Nothing above this handler catches them, so either one ended the process. Each parse
+    // runs before its Set call, so a failed command leaves the variable as it was.
+    try {
+        if (vType == VARTYPE_STRING) {
+            Ship::Context::GetInstance()->GetConsoleVariables()->SetString(args[1].c_str(), args[2].c_str());
+        } else if (vType == VARTYPE_FLOAT) {
+            Ship::Context::GetInstance()->GetConsoleVariables()->SetFloat((char*)args[1].c_str(), std::stof(args[2]));
+        } else if (vType == VARTYPE_RGBA) {
+            uint32_t val = std::stoul(&args[2].c_str()[1], nullptr, 16);
+            Color_RGBA8 clr;
+            clr.r = val >> 24;
+            clr.g = val >> 16;
+            clr.b = val >> 8;
+            clr.a = val & 0xFF;
+            Ship::Context::GetInstance()->GetConsoleVariables()->SetColor((char*)args[1].c_str(), clr);
+        } else {
+            Ship::Context::GetInstance()->GetConsoleVariables()->SetInteger(args[1].c_str(), std::stoi(args[2]));
+        }
+    } catch (const std::out_of_range&) {
+        if (output) {
+            *output += StringHelper::Sprintf("[LUS] Could not set %s: '%s' is out of range.", args[1].c_str(),
+                                             args[2].c_str());
+        }
+
+        return 1;
+    } catch (const std::invalid_argument&) {
+        if (output) {
+            *output += StringHelper::Sprintf("[LUS] Could not set %s: '%s' is not a number.", args[1].c_str(),
+                                             args[2].c_str());
+        }
+
+        return 1;
     }
 
     Ship::Context::GetInstance()->GetConsoleVariables()->Save();
