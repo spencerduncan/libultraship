@@ -432,6 +432,14 @@ void ResourceManager::SetAltAssetsEnabled(bool isEnabled) {
     mAltAssetsEnabled = isEnabled;
 }
 
+void ResourceManager::SetDefaultCacheOwner(uintptr_t owner) {
+    mDefaultCacheOwner = owner;
+}
+
+uintptr_t ResourceManager::GetDefaultCacheOwner() {
+    return mDefaultCacheOwner;
+}
+
 size_t ResourceManager::GetResourceSize(std::shared_ptr<IResource> resource) {
     if (resource == nullptr) {
         return 0;
