@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -104,6 +105,16 @@ class ResourceManager {
     bool OtrSignatureCheck(const char* fileName);
     bool IsAltAssetsEnabled();
     void SetAltAssetsEnabled(bool isEnabled);
+
+    // The owner every path-only call (LoadResource, LoadResourceProcess, LoadResourceAsync, GetCachedResource,
+    // LoadResources, DirtyResources, UnloadResource(s)) puts in its ResourceIdentifier. The owner is part of the
+    // cache key, so one process hosting two games whose archives share resource paths gives each game its own
+    // owner, and a path one game parsed is never served to the other. Changing it frees, dirties and reparses
+    // nothing: entries cached under another owner stay in the cache, valid, and are served again when that owner
+    // is set again. The default is 0.
+    void SetDefaultCacheOwner(uintptr_t owner);
+    uintptr_t GetDefaultCacheOwner();
+
     std::shared_ptr<File> LoadFileProcess(const ResourceIdentifier& identifier);
     std::shared_ptr<File> LoadFileProcess(const std::string& filePath);
 
@@ -139,7 +150,7 @@ class ResourceManager {
     std::mutex mMutex;
     bool mAltAssetsEnabled = false;
     // Private information for which owner and archive are default.
-    uintptr_t mDefaultCacheOwner = 0;
+    std::atomic<uintptr_t> mDefaultCacheOwner = 0;
     std::shared_ptr<Archive> mDefaultCacheArchive = nullptr;
 };
 } // namespace Ship
