@@ -1,5 +1,6 @@
 #include "ship/resource/archive/ArchiveManager.h"
 
+#include <algorithm>
 #include <filesystem>
 #include "spdlog/spdlog.h"
 
@@ -261,6 +262,18 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(const std::string& archivePa
     const std::string extension = path.extension().string();
     std::shared_ptr<Archive> archive = nullptr;
 
+    // Re-adding a path that is already mounted does not open it a second time. The mounted archive is
+    // re-registered instead (see AddArchive(std::shared_ptr<Archive>)), which is what a fresh add
+    // would have done to the lookup order, minus the second zip handle and file list. The archive's
+    // contents are NOT re-read from disk: a caller that rewrote the file under a mounted path has to
+    // RemoveArchive() it first (or go through WriteFile(), which reloads).
+    for (const auto& mounted : mArchives) {
+        if (mounted->GetPath() == archivePath && mounted->IsLoaded()) {
+            SPDLOG_INFO("Archive {} is already mounted, re-registering it", archivePath);
+            return AddArchive(mounted);
+        }
+    }
+
     SPDLOG_INFO("Reading archive: {}", path.string());
 
     if (StringHelper::IEquals(extension, ".o2r") || StringHelper::IEquals(extension, ".zip")) {
@@ -294,6 +307,54 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(std::shared_ptr<Archive> arc
     }
 
     SPDLOG_INFO("Adding Archive {} to Archive Manager", archive->GetPath());
+
+    // One mounted archive per path. Resolution is newest-wins (mFileToArchive[hash] is overwritten by
+    // the archive added last, and nothing else orders archives), and callers depend on a re-add
+    // putting the archive back on top: a game switch re-adds the arriving game's base archives and
+    // then its mods, and the mods only override the base because they are added after it. So a
+    // second add of a mounted path is a MOVE TO THE TOP, not a no-op: the old entry is dropped from
+    // mArchives (and its game version from mGameVersions) and the archive is pushed to the back and
+    // re-registered below exactly as a first add would, which is also what keeps GetArchives() /
+    // ListFiles() in the order a fresh mount would give. Before this, each re-add left the previous
+    // object in mArchives with its zip handle and file list, and mGameVersions grew by one entry
+    // per versioned archive per switch.
+    for (size_t i = 0; i < mArchives.size(); i++) {
+        const std::shared_ptr<Archive> previous = mArchives[i];
+        if (previous->GetPath() != archive->GetPath()) {
+            continue;
+        }
+        mArchives.erase(mArchives.begin() + i);
+        if (previous->HasGameVersion()) {
+            auto version = std::find(mGameVersions.begin(), mGameVersions.end(), previous->GetGameVersion());
+            if (version != mGameVersions.end()) {
+                mGameVersions.erase(version);
+            }
+        }
+        if (previous != archive) {
+            // A different object under the same path: files only the old object carried must not
+            // keep resolving into it. Hand each to the newest remaining archive that has it, or drop it.
+            for (auto entry = mFileToArchive.begin(); entry != mFileToArchive.end();) {
+                if (entry->second != previous) {
+                    ++entry;
+                    continue;
+                }
+                std::shared_ptr<Archive> heir = nullptr;
+                for (auto candidate = mArchives.rbegin(); candidate != mArchives.rend(); ++candidate) {
+                    if ((*candidate)->HasFile(entry->first)) {
+                        heir = *candidate;
+                        break;
+                    }
+                }
+                if (heir != nullptr) {
+                    entry->second = heir;
+                    ++entry;
+                } else {
+                    entry = mFileToArchive.erase(entry);
+                }
+            }
+        }
+        break;
+    }
 
     mArchives.push_back(archive);
     if (archive->HasGameVersion()) {
