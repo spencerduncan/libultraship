@@ -1,5 +1,6 @@
 #include "ship/resource/archive/ArchiveManager.h"
 
+#include <algorithm>
 #include <filesystem>
 #include "spdlog/spdlog.h"
 
@@ -295,9 +296,72 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(std::shared_ptr<Archive> arc
 
     SPDLOG_INFO("Adding Archive {} to Archive Manager", archive->GetPath());
 
+    // One mounted archive per path. Re-adding a path that is already mounted REPLACES the mounted
+    // archive with the new one (the caller still gets a freshly read archive, so a file or loose
+    // folder that changed on disk between two adds is seen, which re-adds rely on), and the replaced
+    // object leaves mArchives. Before this, every re-add left the previous object mounted with its
+    // zip handle and file list, and mGameVersions grew by one entry per versioned archive per game
+    // switch (#987).
+    //
+    // Two orders matter and they are kept differently:
+    //  - Lookup order is newest-wins (mFileToArchive[hash] is overwritten by the archive added last,
+    //    and nothing else orders archives), and callers depend on a re-add putting the archive back on
+    //    top: a game switch re-adds the arriving game's base archives and then its mods, and a mod only
+    //    overrides the base because it is added after it. So the new archive goes to the back of
+    //    mArchives and registers all its files below exactly as a first add would.
+    //  - mGameVersions is addressed by index (the games read GetGameVersions()[0] for their version,
+    //    region and platform), so the replaced archive's entry is overwritten IN PLACE and nothing
+    //    moves. Erasing it and pushing the new one would turn the first-mounted game's slot over on
+    //    every round trip.
+    constexpr size_t kNoVersionSlot = static_cast<size_t>(-1);
+    size_t versionSlot = kNoVersionSlot;
+    for (size_t i = 0; i < mArchives.size(); i++) {
+        const std::shared_ptr<Archive> previous = mArchives[i];
+        if (previous->GetPath() != archive->GetPath()) {
+            continue;
+        }
+        mArchives.erase(mArchives.begin() + i);
+        if (previous->HasGameVersion()) {
+            auto version = std::find(mGameVersions.begin(), mGameVersions.end(), previous->GetGameVersion());
+            if (version != mGameVersions.end()) {
+                versionSlot = static_cast<size_t>(version - mGameVersions.begin());
+            }
+        }
+        if (previous != archive) {
+            // Files the new archive carries are re-pointed below. A file only the old one carried must
+            // not keep resolving into it: hand it to the newest remaining archive that has it, or drop it.
+            for (auto entry = mFileToArchive.begin(); entry != mFileToArchive.end();) {
+                if (entry->second != previous || archive->HasFile(entry->first)) {
+                    ++entry;
+                    continue;
+                }
+                std::shared_ptr<Archive> heir = nullptr;
+                for (auto candidate = mArchives.rbegin(); candidate != mArchives.rend(); ++candidate) {
+                    if ((*candidate)->HasFile(entry->first)) {
+                        heir = *candidate;
+                        break;
+                    }
+                }
+                if (heir != nullptr) {
+                    entry->second = heir;
+                    ++entry;
+                } else {
+                    entry = mFileToArchive.erase(entry);
+                }
+            }
+        }
+        break;
+    }
+
     mArchives.push_back(archive);
     if (archive->HasGameVersion()) {
-        mGameVersions.push_back(archive->GetGameVersion());
+        if (versionSlot != kNoVersionSlot) {
+            mGameVersions[versionSlot] = archive->GetGameVersion();
+        } else {
+            mGameVersions.push_back(archive->GetGameVersion());
+        }
+    } else if (versionSlot != kNoVersionSlot) {
+        mGameVersions.erase(mGameVersions.begin() + versionSlot);
     }
     const auto fileList = archive->ListFiles();
     for (auto& [hash, filename] : *fileList.get()) {
