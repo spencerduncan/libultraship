@@ -262,18 +262,6 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(const std::string& archivePa
     const std::string extension = path.extension().string();
     std::shared_ptr<Archive> archive = nullptr;
 
-    // Re-adding a path that is already mounted does not open it a second time. The mounted archive is
-    // re-registered instead (see AddArchive(std::shared_ptr<Archive>)), which is what a fresh add
-    // would have done to the lookup order, minus the second zip handle and file list. The archive's
-    // contents are NOT re-read from disk: a caller that rewrote the file under a mounted path has to
-    // RemoveArchive() it first (or go through WriteFile(), which reloads).
-    for (const auto& mounted : mArchives) {
-        if (mounted->GetPath() == archivePath && mounted->IsLoaded()) {
-            SPDLOG_INFO("Archive {} is already mounted, re-registering it", archivePath);
-            return AddArchive(mounted);
-        }
-    }
-
     SPDLOG_INFO("Reading archive: {}", path.string());
 
     if (StringHelper::IEquals(extension, ".o2r") || StringHelper::IEquals(extension, ".zip")) {
@@ -308,16 +296,19 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(std::shared_ptr<Archive> arc
 
     SPDLOG_INFO("Adding Archive {} to Archive Manager", archive->GetPath());
 
-    // One mounted archive per path. Resolution is newest-wins (mFileToArchive[hash] is overwritten by
-    // the archive added last, and nothing else orders archives), and callers depend on a re-add
-    // putting the archive back on top: a game switch re-adds the arriving game's base archives and
-    // then its mods, and the mods only override the base because they are added after it. So a
-    // second add of a mounted path is a MOVE TO THE TOP, not a no-op: the old entry is dropped from
-    // mArchives (and its game version from mGameVersions) and the archive is pushed to the back and
-    // re-registered below exactly as a first add would, which is also what keeps GetArchives() /
-    // ListFiles() in the order a fresh mount would give. Before this, each re-add left the previous
-    // object in mArchives with its zip handle and file list, and mGameVersions grew by one entry
-    // per versioned archive per switch.
+    // One mounted archive per path. Re-adding a path that is already mounted REPLACES the mounted
+    // archive with the new one (the caller still gets a freshly read archive, so a file or loose
+    // folder that changed on disk between two adds is seen, which re-adds rely on), and the replaced
+    // object leaves mArchives and mGameVersions. Before this, every re-add left the previous object
+    // mounted with its zip handle and file list, and mGameVersions grew by one entry per versioned
+    // archive per game switch (#987).
+    //
+    // Lookup order is unchanged: resolution is newest-wins (mFileToArchive[hash] is overwritten by the
+    // archive added last, and nothing else orders archives), and callers depend on a re-add putting the
+    // archive back on top: a game switch re-adds the arriving game's base archives and then its mods,
+    // and a mod only overrides the base because it is added after it. The new archive is pushed to the
+    // back and registers all its files below exactly as a first add would, so the replaced one is
+    // removed without disturbing where anything else sits.
     for (size_t i = 0; i < mArchives.size(); i++) {
         const std::shared_ptr<Archive> previous = mArchives[i];
         if (previous->GetPath() != archive->GetPath()) {
@@ -331,10 +322,10 @@ std::shared_ptr<Archive> ArchiveManager::AddArchive(std::shared_ptr<Archive> arc
             }
         }
         if (previous != archive) {
-            // A different object under the same path: files only the old object carried must not
-            // keep resolving into it. Hand each to the newest remaining archive that has it, or drop it.
+            // Files the new archive carries are re-pointed below. A file only the old one carried must
+            // not keep resolving into it: hand it to the newest remaining archive that has it, or drop it.
             for (auto entry = mFileToArchive.begin(); entry != mFileToArchive.end();) {
-                if (entry->second != previous) {
+                if (entry->second != previous || archive->HasFile(entry->first)) {
                     ++entry;
                     continue;
                 }
