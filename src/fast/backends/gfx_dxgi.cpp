@@ -413,6 +413,22 @@ static LRESULT CALLBACK gfx_dxgi_wnd_proc(HWND h_wnd, UINT message, WPARAM w_par
         case WM_KEYUP:
             self->OnKeyup(w_param, l_param);
             break;
+        case WM_SYSKEYDOWN:
+            // Windows delivers F10 as a system key and DefWindowProc turns it into SC_KEYMENU, which enters the
+            // menu loop and stalls the frame loop until another key is pressed. Hand F10 to the game like an
+            // ordinary key and do not forward it. Every other system key (Alt+F4, Alt+Space, ...) keeps its
+            // default handling.
+            if (w_param == VK_F10) {
+                self->OnKeydown(w_param, l_param);
+                break;
+            }
+            return DefWindowProcW(h_wnd, message, w_param, l_param);
+        case WM_SYSKEYUP:
+            if (w_param == VK_F10) {
+                self->OnKeyup(w_param, l_param);
+                break;
+            }
+            return DefWindowProcW(h_wnd, message, w_param, l_param);
         case WM_LBUTTONDOWN:
             self->OnMouseButtonDown(0);
             break;
