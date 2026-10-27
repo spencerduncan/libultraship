@@ -355,7 +355,11 @@ void CrashHandler::PrintStack(CONTEXT* ctx) {
         }
         symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
         symbol->MaxNameLen = MAX_SYM_NAME;
-        SymFromAddr(process, (ULONG64)stack.AddrPC.Offset, &displacement, symbol);
+        // Without symbols (a release build with no pdb next to it) SymFromAddr fails and leaves the
+        // buffer as it was, so name the frame "???" instead of printing whatever the buffer held.
+        if (!SymFromAddr(process, (ULONG64)stack.AddrPC.Offset, &displacement, symbol)) {
+            strcpy_s(symbol->Name, MAX_SYM_NAME, "???");
+        }
 #if defined(_M_AMD64)
         IMAGEHLP_LINE64 line;
         line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
@@ -372,19 +376,29 @@ void CrashHandler::PrintStack(CONTEXT* ctx) {
             sprintf_s(lineNumberStr, sizeof(lineNumberStr), " Line: %d", line.LineNumber);
             AppendLine(lineNumberStr);
         } else {
+            // No line info: print the frame's own PC and its offset into the module that holds it. The
+            // offset is what resolves against a linker map (an RVA), whatever base the module was loaded
+            // at; symbol->Address is the start of the nearest exported symbol, which without a pdb is
+            // the same few addresses for every frame.
             WRITE_VAR_M("    ", symbol->Name);
             char addrString[20];
-            sprintf_s(addrString, std::size(addrString), "0x%016llX", symbol->Address);
-            WRITE_VAR_M("(", addrString);
-            AppendStr(")");
+            sprintf_s(addrString, std::size(addrString), "0x%016llX",
+                      static_cast<unsigned long long>(stack.AddrPC.Offset));
+            WRITE_VAR_M(" (pc ", addrString);
             hModule = nullptr;
             GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                               (LPCTSTR)(stack.AddrPC.Offset), &hModule);
 
             if (hModule != nullptr) {
+                char offsetString[20];
+                sprintf_s(offsetString, std::size(offsetString), "+0x%llX",
+                          static_cast<unsigned long long>(stack.AddrPC.Offset - reinterpret_cast<uintptr_t>(hModule)));
+                AppendStr(")");
                 GetModuleFileNameA(hModule, module, sizeof(module));
-                WRITE_VAR_LINE_M(" in ", module);
+                WRITE_VAR_M(" in ", module);
+                AppendLine(offsetString);
             } else {
+                AppendStr(")");
                 WRITE_VAR_LINE_M(" in ", "???");
             }
         }
