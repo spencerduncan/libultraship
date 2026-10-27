@@ -380,8 +380,11 @@ void ResourceManager::UnloadResources(const ResourceFilter& filter) {
 void ResourceManager::UnloadResourcesProcess(const ResourceFilter& filter) {
     auto list = GetArchiveManager()->ListFiles(filter.IncludeMasks, filter.ExcludeMasks);
 
+    // The filter's own owner and archive, as DirtyResources uses: the string overloads already put the defaults in
+    // the filter, and an UnloadResourcesAsync queued before the default owner changes must still unload the entries
+    // of the owner it was queued for, not the new default's.
     for (const auto& key : *list.get()) {
-        UnloadResource({ key, mDefaultCacheOwner, mDefaultCacheArchive });
+        UnloadResource({ key, filter.Owner, filter.Parent });
     }
 }
 

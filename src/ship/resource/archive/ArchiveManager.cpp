@@ -61,7 +61,10 @@ std::shared_ptr<File> ArchiveManager::LoadFile(uint64_t hash) {
         return nullptr;
     }
 
-    return it->second->LoadFile(hash);
+    // Hold the archive for the whole load: a concurrent AddArchive of the same path replaces the map
+    // entry, and the replaced archive's destructor closes its handle.
+    const std::shared_ptr<Archive> archive = it->second;
+    return archive->LoadFile(hash);
 }
 
 bool ArchiveManager::HasFile(const std::string& filePath) {
