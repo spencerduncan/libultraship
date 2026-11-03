@@ -929,9 +929,24 @@ void GfxRenderingAPIOGL::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
         return;
     }
 
+    // Read RGBA8 and pack to RGBA5551 here, rather than reading GL_UNSIGNED_SHORT_5_5_5_1 straight into the caller's
+    // buffer: upstream reports drivers (NVIDIA) that write 8 bytes per pixel for that format, and the default 4-byte
+    // pack alignment pads a 2-byte-per-pixel row of odd width. Either overran the caller's width * height buffer.
+    // RGBA8 rows are always 4-byte aligned. The packing rounds to nearest, as GL's own 5551 conversion does.
+    std::vector<uint8_t> rgba8((size_t)width * height * 4);
+
     glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[fb_id].fbo);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, (void*)rgba16_buf);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba8.data());
     glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
+
+    for (size_t i = 0; i < (size_t)width * height; i++) {
+        const uint8_t* px = &rgba8[i * 4];
+        uint16_t r = (px[0] * 31 + 127) / 255;
+        uint16_t g = (px[1] * 31 + 127) / 255;
+        uint16_t b = (px[2] * 31 + 127) / 255;
+        uint16_t a = px[3] >= 128 ? 1 : 0;
+        rgba16_buf[i] = (uint16_t)((r << 11) | (g << 6) | (b << 1) | a);
+    }
 }
 
 std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>

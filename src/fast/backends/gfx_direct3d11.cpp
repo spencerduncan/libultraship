@@ -953,12 +953,19 @@ void GfxRenderingAPIDX11::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32
     FramebufferDX11& fb = mFrameBuffers[fb_id];
     TextureData& td = mTextures[fb.texture_id];
 
-    ID3D11Texture2D* staging = nullptr;
+    // CopyResource copies nothing unless both textures have the same dimensions, so size the staging texture to the
+    // framebuffer's texture rather than to the request, and sample it (nearest) to the requested size below.
+    D3D11_TEXTURE2D_DESC srcDesc;
+    td.texture->GetDesc(&srcDesc);
+    if (srcDesc.Width == 0 || srcDesc.Height == 0 || width == 0 || height == 0) {
+        return;
+    }
 
     // Create an staging texture with cpu read access
+    ComPtr<ID3D11Texture2D> staging;
     D3D11_TEXTURE2D_DESC texture_desc;
-    texture_desc.Width = width;
-    texture_desc.Height = height;
+    texture_desc.Width = srcDesc.Width;
+    texture_desc.Height = srcDesc.Height;
     texture_desc.Usage = D3D11_USAGE_STAGING;
     texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -969,48 +976,34 @@ void GfxRenderingAPIDX11::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32
     texture_desc.SampleDesc.Count = 1;
     texture_desc.SampleDesc.Quality = 0;
 
-    ThrowIfFailed(mDevice->CreateTexture2D(&texture_desc, nullptr, &staging));
+    ThrowIfFailed(mDevice->CreateTexture2D(&texture_desc, nullptr, staging.GetAddressOf()));
 
     // Copy the framebuffer texture to the staging texture
-    mContext->CopyResource(staging, td.texture.Get());
+    mContext->CopyResource(staging.Get(), td.texture.Get());
 
     // Map the staging texture to a resource that we can read
     D3D11_MAPPED_SUBRESOURCE resource = {};
-    ThrowIfFailed(mContext->Map(staging, 0, D3D11_MAP_READ, 0, &resource));
+    ThrowIfFailed(mContext->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &resource));
 
-    if (!resource.pData) {
-        mContext->Unmap(staging, 0);
-        staging->Release();
-        return;
-    }
+    if (resource.pData != nullptr) {
+        // Convert the RGBA32 values to RGBA16 straight from the mapped rows. Rows are RowPitch bytes apart, which can
+        // be more than Width * 4, so they are addressed by RowPitch rather than copied into a tightly packed buffer.
+        for (uint32_t j = 0; j < height; j++) {
+            const uint32_t srcY = j * srcDesc.Height / height;
+            const uint32_t* srcRow = (const uint32_t*)((const uint8_t*)resource.pData + srcY * resource.RowPitch);
+            for (uint32_t i = 0; i < width; i++) {
+                uint32_t pixel = srcRow[i * srcDesc.Width / width];
+                uint8_t r = (((pixel & 0xFF) + 4) * 0x1F) / 0xFF;
+                uint8_t g = ((((pixel >> 8) & 0xFF) + 4) * 0x1F) / 0xFF;
+                uint8_t b = ((((pixel >> 16) & 0xFF) + 4) * 0x1F) / 0xFF;
+                uint8_t a = ((pixel >> 24) & 0xFF) ? 1 : 0;
 
-    // Copy the mapped values to a temp array that we can process later
-    uint32_t* temp = new uint32_t[width * height]();
-    for (size_t i = 0; i < height; i++) {
-        memcpy((uint8_t*)temp + (resource.RowPitch * i), (uint8_t*)resource.pData + (resource.RowPitch * i),
-               resource.RowPitch);
-    }
-
-    mContext->Unmap(staging, 0);
-
-    // Convert the RGBA32 values to RGBA16
-    for (size_t i = 0; i < width; i++) {
-        for (size_t j = 0; j < height; j++) {
-            uint32_t pixel = temp[i + (j * width)];
-            uint8_t r = (((pixel & 0xFF) + 4) * 0x1F) / 0xFF;
-            uint8_t g = ((((pixel >> 8) & 0xFF) + 4) * 0x1F) / 0xFF;
-            uint8_t b = ((((pixel >> 16) & 0xFF) + 4) * 0x1F) / 0xFF;
-            uint8_t a = ((pixel >> 24) & 0xFF) ? 1 : 0;
-
-            rgba16_buf[i + (j * width)] = (r << 11) | (g << 6) | (b << 1) | a;
+                rgba16_buf[i + (j * width)] = (r << 11) | (g << 6) | (b << 1) | a;
+            }
         }
     }
 
-    // Cleanup
-    staging->Release();
-    staging = nullptr;
-
-    delete[] temp;
+    mContext->Unmap(staging.Get(), 0);
 }
 
 void GfxRenderingAPIDX11::SetTextureFilter(FilteringMode mode) {
