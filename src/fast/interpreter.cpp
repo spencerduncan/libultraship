@@ -1978,6 +1978,18 @@ void Interpreter::GfxSpExtraGeometryMode(uint32_t clear, uint32_t set) {
     mRsp->extra_geometry_mode |= set;
 }
 
+// Scales a viewport or scissor rectangle by computing both edges and rounding them outward. The fields are integers,
+// so scaling x and width separately truncated both and could leave the right or bottom edge up to 2px short of the
+// true edge (an unrendered strip at the window edge at non-integer scales).
+static void ScaleAreaOutward(XYWidthHeight* area, float rx, float ry) {
+    const float x2 = (area->x + (float)area->width) * rx;
+    const float y2 = (area->y + (float)area->height) * ry;
+    area->x = (int16_t)floorf(area->x * rx);
+    area->y = (int16_t)floorf(area->y * ry);
+    area->width = (uint32_t)(ceilf(x2) - area->x);
+    area->height = (uint32_t)(ceilf(y2) - area->y);
+}
+
 void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
     if (!mFbActive) {
         // Adjust the y origin based on the y-inversion for the active framebuffer
@@ -1988,10 +2000,8 @@ void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
             area->y = mNativeDimensions.height - area->y;
         }
 
-        area->width *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-        area->height *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
-        area->x *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-        area->y *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
+        ScaleAreaOutward(area, RATIO_X(mActiveFrameBuffer, mCurDimensions),
+                         RATIO_Y(mActiveFrameBuffer, mCurDimensions));
 
         if (!mRendersToFb || (mMsaaLevel > 1 && mCurDimensions.width == mGameWindowViewport.width &&
                               mCurDimensions.height == mGameWindowViewport.height)) {
@@ -2002,10 +2012,8 @@ void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
         area->y = mActiveFrameBuffer->second.orig_height - area->y;
 
         if (mActiveFrameBuffer->second.resize) {
-            area->width *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-            area->height *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
-            area->x *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-            area->y *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
+            ScaleAreaOutward(area, RATIO_X(mActiveFrameBuffer, mCurDimensions),
+                             RATIO_Y(mActiveFrameBuffer, mCurDimensions));
         }
     }
 }
