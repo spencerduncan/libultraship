@@ -47,9 +47,13 @@ static void VertexArraySetAttribs(ShaderProgram* prg) {
     size_t pos = 0;
 
     for (int i = 0; i < prg->numAttribs; i++) {
-        glEnableVertexAttribArray(prg->attribLocations[i]);
-        glVertexAttribPointer(prg->attribLocations[i], prg->attribSizes[i], GL_FLOAT, GL_FALSE,
-                              numFloats * sizeof(float), (void*)(pos * sizeof(float)));
+        // glGetAttribLocation returns -1 for an attribute the shader compiler optimised out. The stride still
+        // counts it, but passing -1 to GL raises GL_INVALID_VALUE.
+        if (prg->attribLocations[i] >= 0) {
+            glEnableVertexAttribArray(prg->attribLocations[i]);
+            glVertexAttribPointer(prg->attribLocations[i], prg->attribSizes[i], GL_FLOAT, GL_FALSE,
+                                  numFloats * sizeof(float), (void*)(pos * sizeof(float)));
+        }
         pos += prg->attribSizes[i];
     }
 }
@@ -87,7 +91,9 @@ void GfxRenderingAPIOGL::SetPerDrawUniforms() {
 void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
     if (old_prg != nullptr) {
         for (unsigned int i = 0; i < old_prg->numAttribs; i++) {
-            glDisableVertexAttribArray(old_prg->attribLocations[i]);
+            if (old_prg->attribLocations[i] >= 0) {
+                glDisableVertexAttribArray(old_prg->attribLocations[i]);
+            }
         }
     }
 }
