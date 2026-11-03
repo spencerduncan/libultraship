@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <mutex>
 
 using namespace Microsoft::WRL;
 
@@ -14,6 +15,11 @@ class WasapiAudioPlayer : public AudioPlayer, public IMMNotificationClient {
   public:
     WasapiAudioPlayer(AudioSettings settings) : AudioPlayer(settings) {
     }
+
+    /**
+     * @brief Closes the stream and unregisters the endpoint notification callback.
+     */
+    ~WasapiAudioPlayer();
 
     int Buffered();
     void Play(const uint8_t* buf, size_t len);
@@ -41,6 +47,7 @@ class WasapiAudioPlayer : public AudioPlayer, public IMMNotificationClient {
     bool mInitialized = false;
     bool mStarted = false;
     int32_t mNumChannels = 2;
+    std::mutex mMutex;
 };
 } // namespace Ship
 #endif
