@@ -4606,7 +4606,10 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
                                        false, true, true, !mRendersToFb);
     mRapi->StartFrame();
     mRapi->StartDrawToFramebuffer(mRendersToFb ? mGameFb : 0, (float)mCurDimensions.height / mNativeDimensions.height);
-    mRapi->ClearFramebuffer(false, true);
+    // Clear colour as well as depth, so pixels the display list never draws (including the other game's last frame
+    // after a game switch) do not carry over from the previous frame. RunGuiOnly still clears depth only, so frames
+    // pumped without a display list keep showing the last game frame behind the GUI.
+    mRapi->ClearFramebuffer(true, true);
     mRdp->viewport_or_scissor_changed = true;
     mRenderingState.viewport = {};
     mRenderingState.scissor = {};
