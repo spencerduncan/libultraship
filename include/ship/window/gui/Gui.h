@@ -105,6 +105,9 @@ class Gui {
     bool GamepadNavigationEnabled();
     void BlockGamepadNavigation();
     void UnblockGamepadNavigation();
+    // Re-binds ImGui's SDL2 gamepad backend to the connected controllers. Called at init and whenever a controller
+    // is added or removed; a no-op on backends that do not use SDL2 for ImGui input.
+    void RefreshImGuiGamepads();
     void ShutDownImGui(Ship::Window* window);
 
   protected:

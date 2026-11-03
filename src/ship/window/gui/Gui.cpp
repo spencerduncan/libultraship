@@ -216,6 +216,25 @@ void Gui::ImGuiWMInit() {
         default:
             break;
     }
+
+    // Bind ImGui's SDL2 gamepad backend to the connected controllers now that the backend exists.
+    RefreshImGuiGamepads();
+}
+
+void Gui::RefreshImGuiGamepads() {
+    switch (Context::GetInstance()->GetWindow()->GetWindowBackend()) {
+        case WindowBackend::FAST3D_SDL_OPENGL:
+#if __APPLE__
+        case WindowBackend::FAST3D_SDL_METAL:
+#endif
+            // AutoAll merges every connected controller into ImGui's gamepad input and re-enumerates them on the next
+            // frame. ImGui would re-enumerate on its own on SDL_CONTROLLERDEVICEADDED/REMOVED, but the window backend
+            // does not pass those events to ImGui, and SDLAddRemoveDeviceEventHandler consumes them.
+            ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll, nullptr, 0);
+            break;
+        default:
+            break;
+    }
 }
 
 void Gui::ShutDownImGui(Ship::Window* window) {
