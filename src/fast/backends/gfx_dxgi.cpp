@@ -24,6 +24,7 @@
 #include "ship/config/ConsoleVariable.h"
 #include "ship/config/Config.h"
 #include "ship/Context.h"
+#include "ship/controller/controldeck/ControlDeck.h"
 
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -51,6 +52,9 @@
 #define HID_USAGE_GENERIC_MOUSE ((unsigned short)0x02)
 #endif
 using QWORD = uint64_t; // For NEXTRAWINPUTBLOCK
+
+// Game-input block held while the window is unfocused and CVAR_ALLOW_BACKGROUND_INPUTS is 0.
+#define ALLOW_BACKGROUND_INPUTS_BLOCK_ID 95237930
 
 namespace Fast {
 
@@ -505,11 +509,20 @@ static LRESULT CALLBACK gfx_dxgi_wnd_proc(HWND h_wnd, UINT message, WPARAM w_par
             break;
         case WM_SETFOCUS:
             self->mInFocus = true;
+            if (ctx != nullptr && ctx->GetControlDeck() != nullptr) {
+                ctx->GetControlDeck()->UnblockGameInput(ALLOW_BACKGROUND_INPUTS_BLOCK_ID);
+            }
             if (self->mIsMouseCaptured) {
                 self->ApplyMouseCaptureClip();
             }
             break;
         case WM_KILLFOCUS:
+            // There is no SDL window here for SDL to gate controller input on, so block game input while unfocused
+            // unless the player allows background input.
+            if (ctx != nullptr && ctx->GetControlDeck() != nullptr && ctx->GetConsoleVariables() != nullptr &&
+                !ctx->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
+                ctx->GetControlDeck()->BlockGameInput(ALLOW_BACKGROUND_INPUTS_BLOCK_ID);
+            }
             self->mInFocus = false;
             break;
         default:
