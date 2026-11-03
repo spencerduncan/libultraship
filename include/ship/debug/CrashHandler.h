@@ -30,6 +30,14 @@ class CrashHandler {
     void AppendStr(const char* str);
     void PrintCommon();
 
+    /**
+     * @brief Whether a SIGINT, SIGTERM or SIGQUIT has asked the process to shut down.
+     *
+     * The signal handler only records the request, since exit() is not async-signal-safe; the window
+     * backend's event loop polls this and closes the window. Always false where no handler is installed.
+     */
+    static bool IsShutdownRequested();
+
 #ifdef __linux__
     void PrintRegisters(ucontext_t* ctx);
 #elif _WIN32

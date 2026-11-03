@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <atomic>
 #include "ship/utils/StringHelper.h"
 #include "ship/debug/CrashHandler.h"
 #include "ship/Context.h"
@@ -204,8 +205,20 @@ static void ErrorHandler(int sig, siginfo_t* sigInfo, void* data) {
     exit(1);
 }
 
+// Set by ShutdownHandler and read by IsShutdownRequested on the main thread. A lock-free atomic, so the handler may
+// touch it.
+static std::atomic<bool> sShutdownRequested = { false };
+
 static void ShutdownHandler(int sig, siginfo_t* sigInfo, void* data) {
-    exit(1);
+    // exit() would run static destructors and atexit handlers inside the signal handler. They are not
+    // async-signal-safe and can deadlock on a mutex the interrupted thread holds, such as an audio thread's. Record
+    // the request instead; the window backend's event loop sees it and closes the window, the same path as SDL_QUIT.
+    // A second signal, or a process that has not finished shutting down ten seconds later, ends without those
+    // handlers: _exit() and SIGALRM's default action are both async-signal-safe.
+    if (sShutdownRequested.exchange(true)) {
+        _exit(1);
+    }
+    alarm(10);
 }
 
 #elif _WIN32
@@ -564,5 +577,13 @@ CrashHandler::~CrashHandler() {
 
 void CrashHandler::RegisterCallback(CrashHandlerCallback callback) {
     mCallback = callback;
+}
+
+bool CrashHandler::IsShutdownRequested() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    return sShutdownRequested.load();
+#else
+    return false;
+#endif
 }
 } // namespace Ship

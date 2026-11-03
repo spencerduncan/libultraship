@@ -37,6 +37,10 @@
 #include <SDL_syswm.h>
 #endif
 
+// Kept after the platform headers: on Windows it pulls in <windows.h>, which this file otherwise includes only after
+// the SDL, GL and GUI headers.
+#include "ship/debug/CrashHandler.h"
+
 #define GFX_BACKEND_NAME "SDL"
 #define _100NANOSECONDS_IN_SECOND 10000000
 
@@ -712,6 +716,12 @@ void GfxWindowBackendSDL2::HandleEvents() {
     }
     while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
         HandleSingleEvent(event);
+    }
+
+    // A SIGINT, SIGTERM or SIGQUIT only records the request (see CrashHandler's ShutdownHandler); act on it here as
+    // on SDL_QUIT.
+    if (Ship::CrashHandler::IsShutdownRequested()) {
+        Close();
     }
 
     // resync fullscreen state
