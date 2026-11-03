@@ -847,7 +847,8 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
     }
 
     uint32_t width = resultLineSizeBytes * 2;
-    uint32_t height = sizeBytes / resultLineSizeBytes;
+    // A fractional h_byte_scale can round the line size down to 0; UploadTexture skips the resulting empty texture.
+    uint32_t height = resultLineSizeBytes > 0 ? sizeBytes / resultLineSizeBytes : 0;
 
     mRapi->UploadTexture(mTexUploadBuffer, width, height);
 }
@@ -869,11 +870,17 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
     uint32_t lineSizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].line_size_bytes;
 
+    // ImportTexture refuses a CI8 import with no TLUT at all. A TLUT of 128 colours or fewer loads only the low half,
+    // and the high half may never have been loaded, so read zeros (transparent black) for it rather than nullptr.
+    static const uint8_t sEmptyPaletteHalf[128 * 2] = {};
+    const uint8_t* palettes[2] = { mRdp->palettes[0] != nullptr ? mRdp->palettes[0] : sEmptyPaletteHalf,
+                                   mRdp->palettes[1] != nullptr ? mRdp->palettes[1] : sEmptyPaletteHalf };
+
     for (uint32_t i = 0, j = 0; i < sizeBytes; j += fullImageLineSizeBytes - lineSizeBytes) {
         for (uint32_t k = 0; k < lineSizeBytes; i++, k++, j++) {
             uint8_t idx = addr[j];
-            uint16_t col16 = (mRdp->palettes[idx / 128][(idx % 128) * 2] << 8) |
-                             mRdp->palettes[idx / 128][(idx % 128) * 2 + 1]; // Big endian load
+            uint16_t col16 = (palettes[idx / 128][(idx % 128) * 2] << 8) |
+                             palettes[idx / 128][(idx % 128) * 2 + 1]; // Big endian load
             uint8_t a = col16 & 1;
             uint8_t r = col16 >> 11;
             uint8_t g = (col16 >> 6) & 0x1f;
@@ -891,7 +898,8 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
     }
 
     uint32_t width = resultLineSizeBytes;
-    uint32_t height = sizeBytes / resultLineSizeBytes;
+    // A fractional h_byte_scale can round the line size down to 0; UploadTexture skips the resulting empty texture.
+    uint32_t height = resultLineSizeBytes > 0 ? sizeBytes / resultLineSizeBytes : 0;
 
     mRapi->UploadTexture(mTexUploadBuffer, width, height);
 }
@@ -993,6 +1001,47 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
     mRapi->UploadTexture(mTexUploadBuffer, resultNewLineSize / 4, resultNewHeight);
 }
 
+// Inputs the decoders cannot survive. Every decoder except the image path divides by the tile's line size, the CI8
+// and raw copy loops advance only by the loaded line size, and the CI decoders read the TLUT. ImportTexture checks
+// these on a cache miss before the lookup inserts an entry, so a refused import leaves no entry that never received
+// an upload, and a texture that is already cached is still served.
+static bool TextureImportInputsValid(const RDP* rdp, int tile, uint32_t texFlags) {
+    const auto& tileState = rdp->texture_tile[tile];
+    const auto& loaded = rdp->loaded_texture[tileState.tmem_index];
+
+    const bool raw = (texFlags & TEX_FLAG_LOAD_AS_RAW) != 0;
+    bool ci4;
+    bool ci8;
+    if (raw) {
+        ci4 = loaded.raw_tex_metadata.type == TextureType::Palette4bpp;
+        ci8 = loaded.raw_tex_metadata.type == TextureType::Palette8bpp;
+    } else {
+        ci4 = tileState.fmt == G_IM_FMT_CI && tileState.siz == G_IM_SIZ_4b;
+        ci8 = tileState.fmt == G_IM_FMT_CI && tileState.siz == G_IM_SIZ_8b;
+    }
+
+    if (tileState.line_size_bytes == 0) {
+        SPDLOG_ERROR("ImportTexture: tile {} has a line size of 0", tile);
+        return false;
+    }
+    // The raw copy loop (CI4 aside, which raw hands to the CI4 decoder) and the CI8 loop step by this line size.
+    if (((raw && !ci4) || ci8) && loaded.size_bytes > 0 && loaded.line_size_bytes == 0) {
+        SPDLOG_ERROR("ImportTexture: TMEM slot {} holds {} bytes with a line size of 0", tileState.tmem_index,
+                     loaded.size_bytes);
+        return false;
+    }
+    if (ci4 && rdp->palettes[tileState.palette / 8] == nullptr) {
+        SPDLOG_ERROR("ImportTexture: CI4 tile {} uses palette {}, but no TLUT was loaded for it", tile,
+                     tileState.palette);
+        return false;
+    }
+    if (ci8 && rdp->palettes[0] == nullptr && rdp->palettes[1] == nullptr) {
+        SPDLOG_ERROR("ImportTexture: CI8 tile {} has no TLUT loaded", tile);
+        return false;
+    }
+    return true;
+}
+
 void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
     uint8_t fmt = mRdp->texture_tile[tile].fmt;
     uint8_t siz = mRdp->texture_tile[tile].siz;
@@ -1029,6 +1078,11 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         key = { origAddr, { mRdp->palettes[0], mRdp->palettes[1] }, fmt, siz, paletteIndex, origSizeBytes };
     } else {
         key = { origAddr, {}, fmt, siz, paletteIndex, origSizeBytes };
+    }
+
+    if ((texFlags & TEX_FLAG_LOAD_AS_IMG) == 0 && mTextureCache.map.find(key) == mTextureCache.map.end() &&
+        !TextureImportInputsValid(mRdp, tile, texFlags)) {
+        return;
     }
 
     if (TextureCacheLookup(i, key)) {
@@ -1117,6 +1171,12 @@ void Interpreter::ImportTextureMask(int i, int tile) {
     }
 
     TextureCacheKey key = { orig_addr, {}, 0, 0, 0, 0 };
+
+    // The mask's height below divides by the tile's line size. Checked on a cache miss only, as in ImportTexture.
+    if (mRdp->texture_tile[tile].line_size_bytes == 0 && mTextureCache.map.find(key) == mTextureCache.map.end()) {
+        SPDLOG_ERROR("ImportTextureMask: tile {} has a line size of 0", tile);
+        return;
+    }
 
     if (TextureCacheLookup(i, key)) {
         return;
@@ -1642,8 +1702,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     uint32_t tm = 0;
     uint32_t tex_width[2], tex_height[2], tex_width2[2], tex_height2[2];
 
+    // TEXEL1 samples the tile after the first one. The RDP's tile index is three bits, so tile 7 is followed by
+    // tile 0; without the wrap, a first tile of 7 indexed texture_tile[8].
+    const uint32_t textureTiles[2] = { mRdp->first_tile_index % 8u, (mRdp->first_tile_index + 1u) % 8u };
+
     for (int i = 0; i < 2; i++) {
-        uint32_t tile = mRdp->first_tile_index + i;
+        uint32_t tile = textureTiles[i];
         if (comb->usedTextures[i]) {
             if (mRdp->textures_changed[i]) {
                 Flush();
@@ -1762,8 +1826,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             float u = v_arr[i]->u / 32.0f;
             float v = v_arr[i]->v / 32.0f;
 
-            int shifts = mRdp->texture_tile[mRdp->first_tile_index + t].shifts;
-            int shiftt = mRdp->texture_tile[mRdp->first_tile_index + t].shiftt;
+            int shifts = mRdp->texture_tile[textureTiles[t]].shifts;
+            int shiftt = mRdp->texture_tile[textureTiles[t]].shiftt;
             if (shifts != 0) {
                 if (shifts <= 10) {
                     u /= 1 << shifts;
@@ -1779,8 +1843,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                 }
             }
 
-            u -= mRdp->texture_tile[mRdp->first_tile_index + t].uls / 4.0f;
-            v -= mRdp->texture_tile[mRdp->first_tile_index + t].ult / 4.0f;
+            u -= mRdp->texture_tile[textureTiles[t]].uls / 4.0f;
+            v -= mRdp->texture_tile[textureTiles[t]].ult / 4.0f;
 
             if ((mRdp->other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
                 // Linear filter adds 0.5f to the coordinates
