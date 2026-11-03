@@ -7,6 +7,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 #include <any>
 #include <map>
@@ -38,6 +41,10 @@
 #include "libultraship/libultra/os.h"
 
 #include <spdlog/fmt/fmt.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 std::stack<std::string> currentDir;
 
@@ -3433,6 +3440,27 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
     return false;
 }
 
+// A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
+// failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
+// where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
+static bool IsValidResolvedAddress(uintptr_t addr) {
+    if (addr > 0x0FFFFFFF) {
+        return true;
+    }
+
+    // Still in the N64 segmented range, but might be a false positive (a real low pointer).
+#ifdef _WIN32
+    // For Windows, check whether the address belongs to a dll.
+    HMODULE module = nullptr;
+    return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCSTR>(addr), &module) != 0;
+#else
+    // For non-Windows platforms, check whether the address belongs to a loaded object.
+    Dl_info info;
+    return dladdr(reinterpret_cast<void*>(addr), &info) != 0;
+#endif
+}
+
 bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
     Interpreter* gfx = mInstance.lock().get();
     F3DGfx* cmd = *cmd0;
@@ -3461,6 +3489,10 @@ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
             rawTexMetdata.type = tex->Type;
             rawTexMetdata.resource = tex;
         }
+    }
+
+    if (!IsValidResolvedAddress(i)) {
+        return false;
     }
 
     gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1, imgData, texFlags, rawTexMetdata, (void*)i);
@@ -4239,6 +4271,21 @@ static void gfx_step() {
     }
 
     if (otrHandlers.contains(opcode)) {
+        // OTR filepath handlers expect w1 to be a valid string pointer.
+        // Guard against null or N64-segment addresses that would crash in strlen/strncmp.
+        if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
+            opcode == OTR_G_DL_OTR_FILEPATH || opcode == OTR_G_PUSHCD || opcode == OTR_G_MTX_OTR_FILEPATH) {
+            uintptr_t w1 = (uintptr_t)cmd->words.w1;
+            if (w1 < 0x10000
+#if UINTPTR_MAX > 0xFFFFFFFFu
+                // On 64-bit: filter kernel/sentinel addresses.
+                || w1 > 0x0000FFFFFFFFFFFFull
+#endif
+            ) {
+                ++g_exec_stack.currCmd();
+                return;
+            }
+        }
         if (otrHandlers.at(opcode).second(&cmd)) {
             return;
         }
@@ -4648,11 +4695,20 @@ int32_t gfx_check_image_signature(const char* imgData) {
         return 0;
     }
 
-    if (i != 0) {
-        return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
+    // Filter addresses that are obviously not valid string pointers before
+    // attempting to dereference for the "__OTR__" check.
+    if (i == 0 || i < 0x10000) {
+        return 0;
     }
+#if UINTPTR_MAX > 0xFFFFFFFFu
+    // On 64-bit: filter kernel/sentinel addresses. Upper bound covers all
+    // user-space layouts (x86_64 47-bit canonical, ARM64 48-bit VA, etc.).
+    if (i > 0x0000FFFFFFFFFFFFull) {
+        return 0;
+    }
+#endif
 
-    return 0;
+    return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
 }
 
 void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {
