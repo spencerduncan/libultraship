@@ -3283,7 +3283,9 @@ bool gfx_branch_z_otr_handler_f3dex2(F3DGfx** cmd0) {
 bool gfx_end_dl_handler_common(F3DGfx** cmd0) {
     Interpreter* gfx = mInstance.lock().get();
     gfx->mMarkerOn = false;
-    *cmd0 = g_exec_stack.ret();
+    // cmd0 points at the command stack's top slot, which ret() pops; writing through it afterwards would write to a
+    // destroyed element. The next gfx_step reads the new top itself.
+    g_exec_stack.ret();
     return true;
 }
 
