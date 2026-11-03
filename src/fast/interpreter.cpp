@@ -7,6 +7,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 #include <any>
 #include <map>
@@ -38,6 +41,10 @@
 #include "libultraship/libultra/os.h"
 
 #include <spdlog/fmt/fmt.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 std::stack<std::string> currentDir;
 
@@ -499,6 +506,12 @@ void Interpreter::ImportTextureRgba16(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRgba16: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -541,6 +554,12 @@ void Interpreter::ImportTextureRgba32(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRgba32: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t size_bytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -558,6 +577,12 @@ void Interpreter::ImportTextureIA4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -590,6 +615,12 @@ void Interpreter::ImportTextureIA8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -620,6 +651,12 @@ void Interpreter::ImportTextureIA16(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA16: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t size_bytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -662,6 +699,12 @@ void Interpreter::ImportTextureI4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureI4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -706,6 +749,12 @@ void Interpreter::ImportTextureI8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureI8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -733,6 +782,12 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureCi4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t lineSizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].line_size_bytes;
     uint32_t palIdx = mRdp->texture_tile[tile].palette; // 0-15
@@ -777,6 +832,12 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureCi8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -816,6 +877,11 @@ void Interpreter::ImportTextureImg(int tile, bool importReplacement) {
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
 
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureImg: null texture address for tile {}", tile);
+        return;
+    }
+
     uint16_t width = metadata->width;
     uint16_t height = metadata->height;
     mRapi->UploadTexture(addr, width, height);
@@ -827,6 +893,11 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRaw: null texture address for tile {}", tile);
+        return;
+    }
 
     uint16_t width = metadata->width;
     uint16_t height = metadata->height;
@@ -909,6 +980,23 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[tmemIdex].addr;
+
+    if (origAddr == nullptr) {
+        // Try the other TMEM slot -- some multi-tile setups only load one slot
+        // and expect both tiles to reference it.
+        uint32_t otherTmem = tmemIdex ^ 1;
+        if (importReplacement || mRdp->loaded_texture[otherTmem].addr == nullptr) {
+            SPDLOG_WARN("ImportTexture: null texture address for tile {} (both TMEM slots empty)", tile);
+            return;
+        }
+        SPDLOG_WARN("ImportTexture: tile {} TMEM slot {} empty, falling back to slot {}", tile, tmemIdex, otherTmem);
+        // The cache key and the decoders must both read the fallback slot, and the decoders read the
+        // tile's own slot, so point the tile at the other slot for this one import and then restore it.
+        mRdp->texture_tile[tile].tmem_index = (uint8_t)otherTmem;
+        ImportTexture(i, tile, importReplacement);
+        mRdp->texture_tile[tile].tmem_index = (uint8_t)tmemIdex;
+        return;
+    }
 
     TextureCacheKey key;
     if (fmt == G_IM_FMT_CI) {
@@ -3352,6 +3440,27 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
     return false;
 }
 
+// A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
+// failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
+// where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
+static bool IsValidResolvedAddress(uintptr_t addr) {
+    if (addr > 0x0FFFFFFF) {
+        return true;
+    }
+
+    // Still in the N64 segmented range, but might be a false positive (a real low pointer).
+#ifdef _WIN32
+    // For Windows, check whether the address belongs to a dll.
+    HMODULE module = nullptr;
+    return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCSTR>(addr), &module) != 0;
+#else
+    // For non-Windows platforms, check whether the address belongs to a loaded object.
+    Dl_info info;
+    return dladdr(reinterpret_cast<void*>(addr), &info) != 0;
+#endif
+}
+
 bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
     Interpreter* gfx = mInstance.lock().get();
     F3DGfx* cmd = *cmd0;
@@ -3380,6 +3489,10 @@ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
             rawTexMetdata.type = tex->Type;
             rawTexMetdata.resource = tex;
         }
+    }
+
+    if (!IsValidResolvedAddress(i)) {
+        return false;
     }
 
     gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1, imgData, texFlags, rawTexMetdata, (void*)i);
@@ -4158,6 +4271,21 @@ static void gfx_step() {
     }
 
     if (otrHandlers.contains(opcode)) {
+        // OTR filepath handlers expect w1 to be a valid string pointer.
+        // Guard against null or N64-segment addresses that would crash in strlen/strncmp.
+        if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
+            opcode == OTR_G_DL_OTR_FILEPATH || opcode == OTR_G_PUSHCD || opcode == OTR_G_MTX_OTR_FILEPATH) {
+            uintptr_t w1 = (uintptr_t)cmd->words.w1;
+            if (w1 < 0x10000
+#if UINTPTR_MAX > 0xFFFFFFFFu
+                // On 64-bit: filter kernel/sentinel addresses.
+                || w1 > 0x0000FFFFFFFFFFFFull
+#endif
+            ) {
+                ++g_exec_stack.currCmd();
+                return;
+            }
+        }
         if (otrHandlers.at(opcode).second(&cmd)) {
             return;
         }
@@ -4567,11 +4695,20 @@ int32_t gfx_check_image_signature(const char* imgData) {
         return 0;
     }
 
-    if (i != 0) {
-        return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
+    // Filter addresses that are obviously not valid string pointers before
+    // attempting to dereference for the "__OTR__" check.
+    if (i == 0 || i < 0x10000) {
+        return 0;
     }
+#if UINTPTR_MAX > 0xFFFFFFFFu
+    // On 64-bit: filter kernel/sentinel addresses. Upper bound covers all
+    // user-space layouts (x86_64 47-bit canonical, ARM64 48-bit VA, etc.).
+    if (i > 0x0000FFFFFFFFFFFFull) {
+        return 0;
+    }
+#endif
 
-    return 0;
+    return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
 }
 
 void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {

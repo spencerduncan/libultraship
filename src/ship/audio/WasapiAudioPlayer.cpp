@@ -23,6 +23,28 @@ void WasapiAudioPlayer::ThrowIfFailed(HRESULT res) {
     }
 }
 
+WasapiAudioPlayer::~WasapiAudioPlayer() {
+    // Stop the stream and release its COM objects. This player predates upstream's DoClose, so the
+    // close is done here, under the same lock the notification thread takes.
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        if (mClient) {
+            mClient->Stop();
+        }
+        mRenderClient.Reset();
+        mClient.Reset();
+        mDevice.Reset();
+        mInitialized = false;
+        mStarted = false;
+    }
+
+    // Unregistered outside the lock, so a notification already in flight can finish first.
+    if (mDeviceEnumerator) {
+        mDeviceEnumerator->UnregisterEndpointNotificationCallback(this);
+        mDeviceEnumerator.Reset();
+    }
+}
+
 bool WasapiAudioPlayer::SetupStream() {
     try {
         ThrowIfFailed(mDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &mDevice));
@@ -85,19 +107,22 @@ bool WasapiAudioPlayer::DoInit() {
 }
 
 int WasapiAudioPlayer::Buffered() {
+    std::lock_guard<std::mutex> lock(mMutex);
+    // While the device cannot be opened, report the buffer as full so the producer backs off.
     if (!mInitialized) {
         if (!SetupStream()) {
-            return 0;
+            return GetDesiredBuffered();
         }
     }
     try {
         UINT32 padding;
         ThrowIfFailed(mClient->GetCurrentPadding(&padding));
         return padding;
-    } catch (HRESULT res) { return 0; }
+    } catch (HRESULT res) { return GetDesiredBuffered(); }
 }
 
 void WasapiAudioPlayer::Play(const uint8_t* buf, size_t len) {
+    std::lock_guard<std::mutex> lock(mMutex);
     if (!mInitialized) {
         if (!SetupStream()) {
             return;
@@ -143,8 +168,8 @@ HRESULT STDMETHODCALLTYPE WasapiAudioPlayer::OnDeviceRemoved(LPCWSTR pwstrDevice
 HRESULT STDMETHODCALLTYPE WasapiAudioPlayer::OnDefaultDeviceChanged(EDataFlow flow, ERole role,
                                                                     LPCWSTR pwstrDefaultDeviceId) {
     if (flow == eRender && role == eConsole) {
-        // This callback runs on a separate thread,
-        // but it's not important how fast this write takes effect.
+        // This callback runs on a separate thread, so we need to protect mInitialized
+        std::lock_guard<std::mutex> lock(mMutex);
         mInitialized = false;
     }
     return S_OK;
@@ -159,11 +184,8 @@ ULONG STDMETHODCALLTYPE WasapiAudioPlayer::AddRef() {
 }
 
 ULONG STDMETHODCALLTYPE WasapiAudioPlayer::Release() {
-    ULONG rc = InterlockedDecrement(&mRefCount);
-    if (rc == 0) {
-        delete this;
-    }
-    return rc;
+    // No delete on zero: Audio owns this through a shared_ptr.
+    return InterlockedDecrement(&mRefCount);
 }
 
 HRESULT STDMETHODCALLTYPE WasapiAudioPlayer::QueryInterface(REFIID riid, VOID** ppvInterface) {

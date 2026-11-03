@@ -11,6 +11,8 @@
 #include <excpt.h>
 
 #pragma comment(lib, "Dbghelp.lib")
+
+#include <filesystem>
 #endif
 
 namespace Ship {
@@ -310,6 +312,12 @@ void CrashHandler::PrintStack(CONTEXT* ctx) {
 #if defined(_M_AMD64)
     STACKFRAME64 stack;
     memset(&stack, 0, sizeof(STACKFRAME64));
+    stack.AddrPC.Offset = (*ctx).Rip;
+    stack.AddrPC.Mode = AddrModeFlat;
+    stack.AddrStack.Offset = (*ctx).Rsp;
+    stack.AddrStack.Mode = AddrModeFlat;
+    stack.AddrFrame.Offset = (*ctx).Rbp;
+    stack.AddrFrame.Mode = AddrModeFlat;
 #elif defined(WINDOWS_32_BIT)
     STACKFRAME stack;
     memset(&stack, 0, sizeof(STACKFRAME));
@@ -334,8 +342,20 @@ void CrashHandler::PrintStack(CONTEXT* ctx) {
     process = GetCurrentProcess();
     thread = GetCurrentThread();
 
-    SymSetOptions(SYMOPT_NO_IMAGE_SEARCH | SYMOPT_IGNORE_IMAGEDIR);
-    SymInitialize(process, "debug", true);
+    SymSetOptions(SYMOPT_NO_IMAGE_SEARCH | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+
+    // Search the directory the executable actually lives in, plus a "debug" subdirectory next to it,
+    // rather than a "debug" path relative to whatever the current working directory happens to be.
+    std::string searchPath = "debug";
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(nullptr, exePath, sizeof(exePath)) != 0) {
+        std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+        if (!exeDir.empty()) {
+            searchPath = exeDir.string() + ";" + (exeDir / "debug").string() + ";debug";
+        }
+    }
+
+    SymInitialize(process, searchPath.c_str(), true);
 
     constexpr DWORD machineType =
 #if defined(_M_AMD64)
@@ -409,6 +429,48 @@ void CrashHandler::PrintStack(CONTEXT* ctx) {
 #endif
 }
 
+/**
+ * @brief Writes a minidump next to the log file so the crash can be opened in a debugger after the fact.
+ *
+ * @param ex Exception pointers handed to the unhandled exception filter.
+ * @param outPath Receives the path written to, or is left empty if the dump could not be produced.
+ * @return true if a dump file was written.
+ */
+static bool WriteMiniDump(PEXCEPTION_POINTERS ex, std::string& outPath) {
+#ifndef _M_ARM64
+    std::string dumpPath =
+        Context::GetPathRelativeToAppDirectory("logs/" + Context::GetInstance()->GetName() + "-crash.dmp");
+
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(dumpPath).parent_path(), ec);
+
+    HANDLE file =
+        CreateFileA(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION info;
+    info.ThreadId = GetCurrentThreadId();
+    info.ExceptionPointers = ex;
+    info.ClientPointers = FALSE;
+
+    // MiniDumpWithIndirectlyReferencedMemory pulls in memory referenced by the stacks, which is what makes
+    // a wild-pointer crash inspectable rather than just showing the frames that led to it.
+    const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory |
+                                               MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
+
+    BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &info, nullptr, nullptr);
+    CloseHandle(file);
+
+    if (written) {
+        outPath = dumpPath;
+        return true;
+    }
+#endif
+    return false;
+}
+
 extern "C" LONG WINAPI seh_filter(PEXCEPTION_POINTERS ex) {
     char exceptionString[20];
     std::shared_ptr<CrashHandler> crashHandler = Context::GetInstance()->GetCrashHandler();
@@ -416,6 +478,43 @@ extern "C" LONG WINAPI seh_filter(PEXCEPTION_POINTERS ex) {
     snprintf(exceptionString, std::size(exceptionString), "0x%x", ex->ExceptionRecord->ExceptionCode);
 
     WRITE_VAR_LINE(crashHandler, "Exception: ", exceptionString);
+
+    // For an access violation the exception record carries the operation and the address that faulted,
+    // which is otherwise only inferable by guessing which register the faulting instruction dereferenced.
+    if (ex->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        ex->ExceptionRecord->NumberParameters >= 2) {
+        const char* operation;
+        switch (ex->ExceptionRecord->ExceptionInformation[0]) {
+            case 0:
+                operation = "read from";
+                break;
+            case 1:
+                operation = "write to";
+                break;
+            case 8:
+                operation = "execute at";
+                break;
+            default:
+                operation = "access of";
+                break;
+        }
+
+        char faultString[80];
+        snprintf(faultString, std::size(faultString), "Invalid %s 0x%016llX", operation,
+                 (unsigned long long)ex->ExceptionRecord->ExceptionInformation[1]);
+        crashHandler->AppendLine(faultString);
+    }
+
+    // Written before the stack walk: DbgHelp loads symbol data and allocates while walking, so a dump taken
+    // afterwards reflects a process state the crash did not actually occur in. The path is appended to the
+    // report here too, because PrintStack flushes the buffer and shuts down spdlog before it returns.
+    std::string dumpPath;
+    if (WriteMiniDump(ex, dumpPath)) {
+        WRITE_VAR_LINE(crashHandler, "Minidump: ", dumpPath.c_str());
+    } else {
+        crashHandler->AppendLine("Minidump: <failed to write>");
+    }
+
     crashHandler->PrintStack(ex->ContextRecord);
     MessageBoxA(
         nullptr,
