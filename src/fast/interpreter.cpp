@@ -515,6 +515,17 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
     }
 }
 
+// Tile size in texels from SETTILESIZE coordinates (10.2 fixed point, stored as floats so interpolated frames can
+// carry fractions). Rounds rather than truncates, so a fractional interpolated size does not lose a texel, and
+// returns 0 for an empty or inverted tile instead of converting a negative float to uint32_t.
+static uint32_t GetTileSizeFromCoordinates(float low, float high) {
+    float size = (high - low + 4.0f) / 4.0f;
+    if (size <= 0.0f) {
+        return 0;
+    }
+    return static_cast<uint32_t>(lroundf(size));
+}
+
 void Interpreter::ImportTextureRgba16(int tile, bool importReplacement) {
     const RawTexMetadata* metadata = &mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].raw_tex_metadata;
     const uint8_t* addr =
@@ -1673,8 +1684,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             }
             tex_width[i] = line_size;
 
-            tex_width2[i] = (mRdp->texture_tile[tile].lrs - mRdp->texture_tile[tile].uls + 4) / 4;
-            tex_height2[i] = (mRdp->texture_tile[tile].lrt - mRdp->texture_tile[tile].ult + 4) / 4;
+            tex_width2[i] = GetTileSizeFromCoordinates(mRdp->texture_tile[tile].uls, mRdp->texture_tile[tile].lrs);
+            tex_height2[i] = GetTileSizeFromCoordinates(mRdp->texture_tile[tile].ult, mRdp->texture_tile[tile].lrt);
 
             uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
             uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
