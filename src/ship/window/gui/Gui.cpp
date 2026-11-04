@@ -2,6 +2,7 @@
 
 #include "ship/window/gui/Gui.h"
 
+#include <cmath>
 #include <cstring>
 #include <utility>
 #include <string>
@@ -197,13 +198,19 @@ void Gui::ImGuiWMInit() {
     switch (Context::GetInstance()->GetWindow()->GetWindowBackend()) {
         case WindowBackend::FAST3D_SDL_OPENGL:
             SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
-            SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+            // Normal priority on purpose: a hint an embedding app set with SDL_HINT_OVERRIDE keeps precedence.
+            // Left unset, SDL's default drops controller input while no SDL window has focus.
+            if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
+                SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+            }
             ImGui_ImplSDL2_InitForOpenGL(static_cast<SDL_Window*>(mImpl.Opengl.Window), mImpl.Opengl.Context);
             break;
 #if __APPLE__
         case WindowBackend::FAST3D_SDL_METAL:
             SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
-            SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+            if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
+                SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+            }
             ImGui_ImplSDL2_InitForMetal(static_cast<SDL_Window*>(mImpl.Metal.Window));
             break;
 #endif
@@ -212,6 +219,25 @@ void Gui::ImGuiWMInit() {
             ImGui_ImplWin32_Init(mImpl.Dx11.Window);
             break;
 #endif
+        default:
+            break;
+    }
+
+    // Bind ImGui's SDL2 gamepad backend to the connected controllers now that the backend exists.
+    RefreshImGuiGamepads();
+}
+
+void Gui::RefreshImGuiGamepads() {
+    switch (Context::GetInstance()->GetWindow()->GetWindowBackend()) {
+        case WindowBackend::FAST3D_SDL_OPENGL:
+#if __APPLE__
+        case WindowBackend::FAST3D_SDL_METAL:
+#endif
+            // AutoAll merges every connected controller into ImGui's gamepad input and re-enumerates them on the next
+            // frame. ImGui would re-enumerate on its own on SDL_CONTROLLERDEVICEADDED/REMOVED, but the window backend
+            // does not pass those events to ImGui, and SDLAddRemoveDeviceEventHandler consumes them.
+            ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll, nullptr, 0);
+            break;
         default:
             break;
     }
@@ -434,9 +460,9 @@ void Gui::ApplyResolutionChanges() {
 
     if (verticalResolutionToggle) { // Use fixed vertical resolution
         if (aspectRatioIsEnabled) {
-            newWidth = uint32_t(float(verticalPixelCount / aspectRatioY) * aspectRatioX);
+            newWidth = std::lround(verticalPixelCount * aspectRatioX / aspectRatioY);
         } else {
-            newWidth = uint32_t(float(verticalPixelCount * size.x / size.y));
+            newWidth = std::lround(verticalPixelCount * size.x / size.y);
         }
         newHeight = verticalPixelCount;
     } else { // Use the window's resolution
@@ -444,9 +470,9 @@ void Gui::ApplyResolutionChanges() {
             if (((float)mInterpreter.lock()->mGameWindowViewport.height /
                  mInterpreter.lock()->mGameWindowViewport.width) < (aspectRatioY / aspectRatioX)) {
                 // when pillarboxed
-                newWidth = uint32_t(float(mInterpreter.lock()->mCurDimensions.height / aspectRatioY) * aspectRatioX);
+                newWidth = std::lround(mInterpreter.lock()->mCurDimensions.height * aspectRatioX / aspectRatioY);
             } else { // when letterboxed
-                newHeight = uint32_t(float(mInterpreter.lock()->mCurDimensions.width / aspectRatioX) * aspectRatioY);
+                newHeight = std::lround(mInterpreter.lock()->mCurDimensions.width * aspectRatioY / aspectRatioX);
             }
         } // else, having both options turned off does nothing.
     }
