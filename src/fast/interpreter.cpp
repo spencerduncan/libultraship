@@ -7,6 +7,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 #include <any>
 #include <map>
@@ -39,6 +42,10 @@
 
 #include <spdlog/fmt/fmt.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 std::stack<std::string> currentDir;
 
 #define SEG_ADDR(seg, addr) (addr | (seg << 24) | 1)
@@ -62,7 +69,7 @@ std::stack<std::string> currentDir;
 #define RATIO_Y(activeFb, dims) \
     ((mFbActive ? activeFb->second.applied_height : dims.height) / (2.0f * HALF_SCREEN_HEIGHT(activeFb)))
 
-#define TEXTURE_CACHE_MAX_SIZE 500
+#define TEXTURE_CACHE_MAX_SIZE 1024
 
 namespace Fast {
 
@@ -253,6 +260,21 @@ void Interpreter::GenerateCC(ColorCombiner* comb, const ColorCombinerKey& key) {
                 c[1][i][k] = i == 0 ? G_CCMUX_0 : G_ACMUX_0;
             }
         }
+
+        // In 1-cycle mode, TEXEL1 returns the same value as TEXEL0.
+        // Remap combiner inputs so the shader samples from the correct slot.
+        // Ex: TEXEL1/TEXEL1_ALPHA -> TEXEL0/TEXEL0_ALPHA
+        for (uint32_t k = 0; k < 4; k++) {
+            if (c[0][0][k] == G_CCMUX_TEXEL1) {
+                c[0][0][k] = G_CCMUX_TEXEL0;
+            }
+            if (c[0][0][k] == G_CCMUX_TEXEL1_ALPHA) {
+                c[0][0][k] = G_CCMUX_TEXEL0_ALPHA;
+            }
+            if (c[0][1][k] == G_ACMUX_TEXEL1) {
+                c[0][1][k] = G_ACMUX_TEXEL0;
+            }
+        }
     }
     {
         uint8_t inputNumber[32] = { 0 };
@@ -411,6 +433,11 @@ void Interpreter::TextureCacheClear() {
     }
     mTextureCache.map.clear();
     mTextureCache.lru.clear();
+    // Pre-allocate buckets so the map never rehashes during normal operation.
+    // Rehashing invalidates all iterators, including those stored in LRU entries.
+    mTextureCache.map.reserve(TEXTURE_CACHE_MAX_SIZE);
+    // Null rendering-state pointers — they pointed into map nodes that are now freed.
+    std::fill(std::begin(mRenderingState.mTextures), std::end(mRenderingState.mTextures), nullptr);
 }
 
 bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
@@ -429,6 +456,10 @@ bool Interpreter::TextureCacheLookup(int i, const TextureCacheKey& key) {
         // Remove the texture that was least recently used
         it = mTextureCache.lru.front().it;
         mTextureCache.free_texture_ids.push_back(it->second.texture_id);
+        for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
+            if (mRenderingState.mTextures[j] == &*it)
+                mRenderingState.mTextures[j] = nullptr;
+        }
         mTextureCache.map.erase(it);
         mTextureCache.lru.pop_front();
     }
@@ -467,6 +498,10 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
         bool again = false;
         for (auto it = mTextureCache.map.begin(bucket); it != mTextureCache.map.end(bucket); ++it) {
             if (it->first.texture_addr == origAddr) {
+                for (int j = 0; j < SHADER_MAX_TEXTURES; j++) {
+                    if (mRenderingState.mTextures[j] == &*it)
+                        mRenderingState.mTextures[j] = nullptr;
+                }
                 mTextureCache.lru.erase(it->second.lru_location);
                 mTextureCache.free_texture_ids.push_back(it->second.texture_id);
                 mTextureCache.map.erase(it->first);
@@ -480,12 +515,29 @@ void Interpreter::TextureCacheDelete(const uint8_t* origAddr) {
     }
 }
 
+// Tile size in texels from SETTILESIZE coordinates (10.2 fixed point, stored as floats so interpolated frames can
+// carry fractions). Rounds rather than truncates, so a fractional interpolated size does not lose a texel, and
+// returns 0 for an empty or inverted tile instead of converting a negative float to uint32_t.
+static uint32_t GetTileSizeFromCoordinates(float low, float high) {
+    float size = (high - low + 4.0f) / 4.0f;
+    if (size <= 0.0f) {
+        return 0;
+    }
+    return static_cast<uint32_t>(lroundf(size));
+}
+
 void Interpreter::ImportTextureRgba16(int tile, bool importReplacement) {
     const RawTexMetadata* metadata = &mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].raw_tex_metadata;
     const uint8_t* addr =
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRgba16: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -528,6 +580,12 @@ void Interpreter::ImportTextureRgba32(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRgba32: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t size_bytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -545,6 +603,12 @@ void Interpreter::ImportTextureIA4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -577,6 +641,12 @@ void Interpreter::ImportTextureIA8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -607,6 +677,12 @@ void Interpreter::ImportTextureIA16(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureIA16: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t size_bytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -649,6 +725,12 @@ void Interpreter::ImportTextureI4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureI4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -693,6 +775,12 @@ void Interpreter::ImportTextureI8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureI8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t full_image_line_size_bytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
@@ -720,6 +808,12 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureCi4: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t lineSizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].line_size_bytes;
     uint32_t palIdx = mRdp->texture_tile[tile].palette; // 0-15
@@ -753,7 +847,8 @@ void Interpreter::ImportTextureCi4(int tile, bool importReplacement) {
     }
 
     uint32_t width = resultLineSizeBytes * 2;
-    uint32_t height = sizeBytes / resultLineSizeBytes;
+    // A fractional h_byte_scale can round the line size down to 0; UploadTexture skips the resulting empty texture.
+    uint32_t height = resultLineSizeBytes > 0 ? sizeBytes / resultLineSizeBytes : 0;
 
     mRapi->UploadTexture(mTexUploadBuffer, width, height);
 }
@@ -764,16 +859,28 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureCi8: null texture address for tile {}", tile);
+        return;
+    }
+
     uint32_t sizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].size_bytes;
     uint32_t fullImageLineSizeBytes =
         mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].full_image_line_size_bytes;
     uint32_t lineSizeBytes = mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].line_size_bytes;
 
+    // ImportTexture refuses a CI8 import with no TLUT at all. A TLUT of 128 colours or fewer loads only the low half,
+    // and the high half may never have been loaded, so read zeros (transparent black) for it rather than nullptr.
+    static const uint8_t sEmptyPaletteHalf[128 * 2] = {};
+    const uint8_t* palettes[2] = { mRdp->palettes[0] != nullptr ? mRdp->palettes[0] : sEmptyPaletteHalf,
+                                   mRdp->palettes[1] != nullptr ? mRdp->palettes[1] : sEmptyPaletteHalf };
+
     for (uint32_t i = 0, j = 0; i < sizeBytes; j += fullImageLineSizeBytes - lineSizeBytes) {
         for (uint32_t k = 0; k < lineSizeBytes; i++, k++, j++) {
             uint8_t idx = addr[j];
-            uint16_t col16 = (mRdp->palettes[idx / 128][(idx % 128) * 2] << 8) |
-                             mRdp->palettes[idx / 128][(idx % 128) * 2 + 1]; // Big endian load
+            uint16_t col16 = (palettes[idx / 128][(idx % 128) * 2] << 8) |
+                             palettes[idx / 128][(idx % 128) * 2 + 1]; // Big endian load
             uint8_t a = col16 & 1;
             uint8_t r = col16 >> 11;
             uint8_t g = (col16 >> 6) & 0x1f;
@@ -791,7 +898,8 @@ void Interpreter::ImportTextureCi8(int tile, bool importReplacement) {
     }
 
     uint32_t width = resultLineSizeBytes;
-    uint32_t height = sizeBytes / resultLineSizeBytes;
+    // A fractional h_byte_scale can round the line size down to 0; UploadTexture skips the resulting empty texture.
+    uint32_t height = resultLineSizeBytes > 0 ? sizeBytes / resultLineSizeBytes : 0;
 
     mRapi->UploadTexture(mTexUploadBuffer, width, height);
 }
@@ -802,6 +910,11 @@ void Interpreter::ImportTextureImg(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureImg: null texture address for tile {}", tile);
+        return;
+    }
 
     uint16_t width = metadata->width;
     uint16_t height = metadata->height;
@@ -814,6 +927,11 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
         importReplacement && (metadata->resource != nullptr)
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[mRdp->texture_tile[tile].tmem_index].addr;
+
+    if (addr == nullptr) {
+        SPDLOG_ERROR("ImportTextureRaw: null texture address for tile {}", tile);
+        return;
+    }
 
     uint16_t width = metadata->width;
     uint16_t height = metadata->height;
@@ -883,6 +1001,47 @@ void Interpreter::ImportTextureRaw(int tile, bool importReplacement) {
     mRapi->UploadTexture(mTexUploadBuffer, resultNewLineSize / 4, resultNewHeight);
 }
 
+// Inputs the decoders cannot survive. Every decoder except the image path divides by the tile's line size, the CI8
+// and raw copy loops advance only by the loaded line size, and the CI decoders read the TLUT. ImportTexture checks
+// these on a cache miss before the lookup inserts an entry, so a refused import leaves no entry that never received
+// an upload, and a texture that is already cached is still served.
+static bool TextureImportInputsValid(const RDP* rdp, int tile, uint32_t texFlags) {
+    const auto& tileState = rdp->texture_tile[tile];
+    const auto& loaded = rdp->loaded_texture[tileState.tmem_index];
+
+    const bool raw = (texFlags & TEX_FLAG_LOAD_AS_RAW) != 0;
+    bool ci4;
+    bool ci8;
+    if (raw) {
+        ci4 = loaded.raw_tex_metadata.type == TextureType::Palette4bpp;
+        ci8 = loaded.raw_tex_metadata.type == TextureType::Palette8bpp;
+    } else {
+        ci4 = tileState.fmt == G_IM_FMT_CI && tileState.siz == G_IM_SIZ_4b;
+        ci8 = tileState.fmt == G_IM_FMT_CI && tileState.siz == G_IM_SIZ_8b;
+    }
+
+    if (tileState.line_size_bytes == 0) {
+        SPDLOG_ERROR("ImportTexture: tile {} has a line size of 0", tile);
+        return false;
+    }
+    // The raw copy loop (CI4 aside, which raw hands to the CI4 decoder) and the CI8 loop step by this line size.
+    if (((raw && !ci4) || ci8) && loaded.size_bytes > 0 && loaded.line_size_bytes == 0) {
+        SPDLOG_ERROR("ImportTexture: TMEM slot {} holds {} bytes with a line size of 0", tileState.tmem_index,
+                     loaded.size_bytes);
+        return false;
+    }
+    if (ci4 && rdp->palettes[tileState.palette / 8] == nullptr) {
+        SPDLOG_ERROR("ImportTexture: CI4 tile {} uses palette {}, but no TLUT was loaded for it", tile,
+                     tileState.palette);
+        return false;
+    }
+    if (ci8 && rdp->palettes[0] == nullptr && rdp->palettes[1] == nullptr) {
+        SPDLOG_ERROR("ImportTexture: CI8 tile {} has no TLUT loaded", tile);
+        return false;
+    }
+    return true;
+}
+
 void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
     uint8_t fmt = mRdp->texture_tile[tile].fmt;
     uint8_t siz = mRdp->texture_tile[tile].siz;
@@ -897,11 +1056,33 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
             ? mMaskedTextures.find(GetBaseTexturePath(metadata->resource->GetInitData()->Path))->second.replacementData
             : mRdp->loaded_texture[tmemIdex].addr;
 
+    if (origAddr == nullptr) {
+        // Try the other TMEM slot -- some multi-tile setups only load one slot
+        // and expect both tiles to reference it.
+        uint32_t otherTmem = tmemIdex ^ 1;
+        if (importReplacement || mRdp->loaded_texture[otherTmem].addr == nullptr) {
+            SPDLOG_WARN("ImportTexture: null texture address for tile {} (both TMEM slots empty)", tile);
+            return;
+        }
+        SPDLOG_WARN("ImportTexture: tile {} TMEM slot {} empty, falling back to slot {}", tile, tmemIdex, otherTmem);
+        // The cache key and the decoders must both read the fallback slot, and the decoders read the
+        // tile's own slot, so point the tile at the other slot for this one import and then restore it.
+        mRdp->texture_tile[tile].tmem_index = (uint8_t)otherTmem;
+        ImportTexture(i, tile, importReplacement);
+        mRdp->texture_tile[tile].tmem_index = (uint8_t)tmemIdex;
+        return;
+    }
+
     TextureCacheKey key;
     if (fmt == G_IM_FMT_CI) {
         key = { origAddr, { mRdp->palettes[0], mRdp->palettes[1] }, fmt, siz, paletteIndex, origSizeBytes };
     } else {
         key = { origAddr, {}, fmt, siz, paletteIndex, origSizeBytes };
+    }
+
+    if ((texFlags & TEX_FLAG_LOAD_AS_IMG) == 0 && mTextureCache.map.find(key) == mTextureCache.map.end() &&
+        !TextureImportInputsValid(mRdp, tile, texFlags)) {
+        return;
     }
 
     if (TextureCacheLookup(i, key)) {
@@ -990,6 +1171,12 @@ void Interpreter::ImportTextureMask(int i, int tile) {
     }
 
     TextureCacheKey key = { orig_addr, {}, 0, 0, 0, 0 };
+
+    // The mask's height below divides by the tile's line size. Checked on a cache miss only, as in ImportTexture.
+    if (mRdp->texture_tile[tile].line_size_bytes == 0 && mTextureCache.map.find(key) == mTextureCache.map.end()) {
+        SPDLOG_ERROR("ImportTextureMask: tile {} has a line size of 0", tile);
+        return;
+    }
 
     if (TextureCacheLookup(i, key)) {
         return;
@@ -1405,7 +1592,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         }
     }
 
-    bool depth_test = (mRsp->geometry_mode & G_ZBUFFER) == G_ZBUFFER;
+    // The RDP compares depth only when the render mode sets Z_CMP; G_ZBUFFER alone just enables the Z input.
+    bool depth_test = (mRsp->geometry_mode & G_ZBUFFER) == G_ZBUFFER && (mRdp->other_mode_l & Z_CMP) == Z_CMP;
     bool depth_mask = (mRdp->other_mode_l & Z_UPD) == Z_UPD;
     uint8_t depth_test_and_mask = (depth_test ? 1 : 0) | (depth_mask ? 2 : 0);
     if (depth_test_and_mask != mRenderingState.depth_test_and_mask) {
@@ -1514,8 +1702,12 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     uint32_t tm = 0;
     uint32_t tex_width[2], tex_height[2], tex_width2[2], tex_height2[2];
 
+    // TEXEL1 samples the tile after the first one. The RDP's tile index is three bits, so tile 7 is followed by
+    // tile 0; without the wrap, a first tile of 7 indexed texture_tile[8].
+    const uint32_t textureTiles[2] = { mRdp->first_tile_index % 8u, (mRdp->first_tile_index + 1u) % 8u };
+
     for (int i = 0; i < 2; i++) {
-        uint32_t tile = mRdp->first_tile_index + i;
+        uint32_t tile = textureTiles[i];
         if (comb->usedTextures[i]) {
             if (mRdp->textures_changed[i]) {
                 Flush();
@@ -1556,8 +1748,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             }
             tex_width[i] = line_size;
 
-            tex_width2[i] = (mRdp->texture_tile[tile].lrs - mRdp->texture_tile[tile].uls + 4) / 4;
-            tex_height2[i] = (mRdp->texture_tile[tile].lrt - mRdp->texture_tile[tile].ult + 4) / 4;
+            tex_width2[i] = GetTileSizeFromCoordinates(mRdp->texture_tile[tile].uls, mRdp->texture_tile[tile].lrs);
+            tex_height2[i] = GetTileSizeFromCoordinates(mRdp->texture_tile[tile].ult, mRdp->texture_tile[tile].lrt);
 
             uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
             uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
@@ -1634,8 +1826,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             float u = v_arr[i]->u / 32.0f;
             float v = v_arr[i]->v / 32.0f;
 
-            int shifts = mRdp->texture_tile[mRdp->first_tile_index + t].shifts;
-            int shiftt = mRdp->texture_tile[mRdp->first_tile_index + t].shiftt;
+            int shifts = mRdp->texture_tile[textureTiles[t]].shifts;
+            int shiftt = mRdp->texture_tile[textureTiles[t]].shiftt;
             if (shifts != 0) {
                 if (shifts <= 10) {
                     u /= 1 << shifts;
@@ -1651,8 +1843,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                 }
             }
 
-            u -= mRdp->texture_tile[mRdp->first_tile_index + t].uls / 4.0f;
-            v -= mRdp->texture_tile[mRdp->first_tile_index + t].ult / 4.0f;
+            u -= mRdp->texture_tile[textureTiles[t]].uls / 4.0f;
+            v -= mRdp->texture_tile[textureTiles[t]].ult / 4.0f;
 
             if ((mRdp->other_mode_h & (3U << G_MDSFT_TEXTFILT)) != G_TF_POINT) {
                 // Linear filter adds 0.5f to the coordinates
@@ -1786,6 +1978,18 @@ void Interpreter::GfxSpExtraGeometryMode(uint32_t clear, uint32_t set) {
     mRsp->extra_geometry_mode |= set;
 }
 
+// Scales a viewport or scissor rectangle by computing both edges and rounding them outward. The fields are integers,
+// so scaling x and width separately truncated both and could leave the right or bottom edge up to 2px short of the
+// true edge (an unrendered strip at the window edge at non-integer scales).
+static void ScaleAreaOutward(XYWidthHeight* area, float rx, float ry) {
+    const float x2 = (area->x + (float)area->width) * rx;
+    const float y2 = (area->y + (float)area->height) * ry;
+    area->x = (int16_t)floorf(area->x * rx);
+    area->y = (int16_t)floorf(area->y * ry);
+    area->width = (uint32_t)(ceilf(x2) - area->x);
+    area->height = (uint32_t)(ceilf(y2) - area->y);
+}
+
 void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
     if (!mFbActive) {
         // Adjust the y origin based on the y-inversion for the active framebuffer
@@ -1796,10 +2000,8 @@ void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
             area->y = mNativeDimensions.height - area->y;
         }
 
-        area->width *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-        area->height *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
-        area->x *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-        area->y *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
+        ScaleAreaOutward(area, RATIO_X(mActiveFrameBuffer, mCurDimensions),
+                         RATIO_Y(mActiveFrameBuffer, mCurDimensions));
 
         if (!mRendersToFb || (mMsaaLevel > 1 && mCurDimensions.width == mGameWindowViewport.width &&
                               mCurDimensions.height == mGameWindowViewport.height)) {
@@ -1810,10 +2012,8 @@ void Interpreter::AdjustVIewportOrScissor(XYWidthHeight* area) {
         area->y = mActiveFrameBuffer->second.orig_height - area->y;
 
         if (mActiveFrameBuffer->second.resize) {
-            area->width *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-            area->height *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
-            area->x *= RATIO_X(mActiveFrameBuffer, mCurDimensions);
-            area->y *= RATIO_Y(mActiveFrameBuffer, mCurDimensions);
+            ScaleAreaOutward(area, RATIO_X(mActiveFrameBuffer, mCurDimensions),
+                             RATIO_Y(mActiveFrameBuffer, mCurDimensions));
         }
     }
 }
@@ -3182,7 +3382,9 @@ bool gfx_branch_z_otr_handler_f3dex2(F3DGfx** cmd0) {
 bool gfx_end_dl_handler_common(F3DGfx** cmd0) {
     Interpreter* gfx = mInstance.lock().get();
     gfx->mMarkerOn = false;
-    *cmd0 = g_exec_stack.ret();
+    // cmd0 points at the command stack's top slot, which ret() pops; writing through it afterwards would write to a
+    // destroyed element. The next gfx_step reads the new top itself.
+    g_exec_stack.ret();
     return true;
 }
 
@@ -3339,6 +3541,27 @@ bool gfx_othermode_h_handler_f3d(F3DGfx** cmd0) {
     return false;
 }
 
+// A resolved address still in the N64 segmented range (<= 0x0FFFFFFF) usually means SegAddr
+// failed to resolve it (segment not set up). Keep it only if it belongs to a loaded module,
+// where it's a real low pointer (e.g. a static TLUT) rather than an unresolved segment addr.
+static bool IsValidResolvedAddress(uintptr_t addr) {
+    if (addr > 0x0FFFFFFF) {
+        return true;
+    }
+
+    // Still in the N64 segmented range, but might be a false positive (a real low pointer).
+#ifdef _WIN32
+    // For Windows, check whether the address belongs to a dll.
+    HMODULE module = nullptr;
+    return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCSTR>(addr), &module) != 0;
+#else
+    // For non-Windows platforms, check whether the address belongs to a loaded object.
+    Dl_info info;
+    return dladdr(reinterpret_cast<void*>(addr), &info) != 0;
+#endif
+}
+
 bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
     Interpreter* gfx = mInstance.lock().get();
     F3DGfx* cmd = *cmd0;
@@ -3367,6 +3590,10 @@ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
             rawTexMetdata.type = tex->Type;
             rawTexMetdata.resource = tex;
         }
+    }
+
+    if (!IsValidResolvedAddress(i)) {
+        return false;
     }
 
     gfx->GfxDpSetTextureImage(C0(21, 3), C0(19, 2), C0(0, 12) + 1, imgData, texFlags, rawTexMetdata, (void*)i);
@@ -4145,6 +4372,21 @@ static void gfx_step() {
     }
 
     if (otrHandlers.contains(opcode)) {
+        // OTR filepath handlers expect w1 to be a valid string pointer.
+        // Guard against null or N64-segment addresses that would crash in strlen/strncmp.
+        if (opcode == OTR_G_VTX_OTR_FILEPATH || opcode == OTR_G_SETTIMG_OTR_FILEPATH ||
+            opcode == OTR_G_DL_OTR_FILEPATH || opcode == OTR_G_PUSHCD || opcode == OTR_G_MTX_OTR_FILEPATH) {
+            uintptr_t w1 = (uintptr_t)cmd->words.w1;
+            if (w1 < 0x10000
+#if UINTPTR_MAX > 0xFFFFFFFFu
+                // On 64-bit: filter kernel/sentinel addresses.
+                || w1 > 0x0000FFFFFFFFFFFFull
+#endif
+            ) {
+                ++g_exec_stack.currCmd();
+                return;
+            }
+        }
         if (otrHandlers.at(opcode).second(&cmd)) {
             return;
         }
@@ -4217,6 +4459,9 @@ void Interpreter::Init(class GfxWindowBackend* wapi, class GfxRenderingAPI* rapi
     }
 
     ucode_handler_index = UcodeHandlers::ucode_f3dex2;
+
+    // Pre-allocate texture cache buckets to prevent rehash-induced iterator invalidation.
+    mTextureCache.map.reserve(TEXTURE_CACHE_MAX_SIZE);
 }
 
 void Interpreter::Destroy() {
@@ -4361,7 +4606,10 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
                                        false, true, true, !mRendersToFb);
     mRapi->StartFrame();
     mRapi->StartDrawToFramebuffer(mRendersToFb ? mGameFb : 0, (float)mCurDimensions.height / mNativeDimensions.height);
-    mRapi->ClearFramebuffer(false, true);
+    // Clear colour as well as depth, so pixels the display list never draws (including the other game's last frame
+    // after a game switch) do not carry over from the previous frame. RunGuiOnly still clears depth only, so frames
+    // pumped without a display list keep showing the last game frame behind the GUI.
+    mRapi->ClearFramebuffer(true, true);
     mRdp->viewport_or_scissor_changed = true;
     mRenderingState.viewport = {};
     mRenderingState.scissor = {};
@@ -4551,11 +4799,20 @@ int32_t gfx_check_image_signature(const char* imgData) {
         return 0;
     }
 
-    if (i != 0) {
-        return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
+    // Filter addresses that are obviously not valid string pointers before
+    // attempting to dereference for the "__OTR__" check.
+    if (i == 0 || i < 0x10000) {
+        return 0;
     }
+#if UINTPTR_MAX > 0xFFFFFFFFu
+    // On 64-bit: filter kernel/sentinel addresses. Upper bound covers all
+    // user-space layouts (x86_64 47-bit canonical, ARM64 48-bit VA, etc.).
+    if (i > 0x0000FFFFFFFFFFFFull) {
+        return 0;
+    }
+#endif
 
-    return 0;
+    return Ship::Context::GetInstance()->GetResourceManager()->OtrSignatureCheck(imgData);
 }
 
 void Interpreter::RegisterBlendedTexture(const char* name, uint8_t* mask, uint8_t* replacement) {

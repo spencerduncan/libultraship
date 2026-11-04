@@ -16,6 +16,13 @@ OtrArchive::OtrArchive(const std::string& archivePath) : Archive(archivePath) {
 
 OtrArchive::~OtrArchive() {
     SPDLOG_TRACE("destruct otrarchive: {}", GetPath());
+    // Close the StormLib handle, as ~O2rArchive closes its zip. ArchiveManager::AddArchive replaces a
+    // re-added path without Unload()ing the old object, so without this every re-added .otr leaked its
+    // MPQ handle, its OS file handle and its tables. Guarded because Close() reports an error on a
+    // handle that is already gone (after RemoveArchive's Unload, or a failed Open).
+    if (mHandle != nullptr) {
+        Close();
+    }
 }
 
 std::shared_ptr<File> OtrArchive::LoadFile(const std::string& filePath) {

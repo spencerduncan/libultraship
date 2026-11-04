@@ -18,7 +18,7 @@ class AudioPlayer {
   public:
     AudioPlayer(AudioSettings settings) : mAudioSettings(settings) {
     }
-    ~AudioPlayer();
+    virtual ~AudioPlayer();
 
     bool Init();
     virtual int32_t Buffered() = 0;

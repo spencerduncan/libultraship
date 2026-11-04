@@ -24,6 +24,7 @@
 #include "ship/config/ConsoleVariable.h"
 #include "ship/config/Config.h"
 #include "ship/Context.h"
+#include "ship/controller/controldeck/ControlDeck.h"
 
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -51,6 +52,9 @@
 #define HID_USAGE_GENERIC_MOUSE ((unsigned short)0x02)
 #endif
 using QWORD = uint64_t; // For NEXTRAWINPUTBLOCK
+
+// Game-input block held while the window is unfocused and CVAR_ALLOW_BACKGROUND_INPUTS is 0.
+#define ALLOW_BACKGROUND_INPUTS_BLOCK_ID 95237930
 
 namespace Fast {
 
@@ -353,7 +357,10 @@ static LRESULT CALLBACK gfx_dxgi_wnd_proc(HWND h_wnd, UINT message, WPARAM w_par
     char fileName[256];
     Ship::WindowEvent event_impl;
     event_impl.Win32 = { h_wnd, static_cast<int>(message), static_cast<int>(w_param), static_cast<int>(l_param) };
-    Ship::Context::GetInstance()->GetWindow()->GetGui()->HandleWindowEvents(event_impl);
+    auto ctx = Ship::Context::GetInstance();
+    if (ctx && ctx->GetWindow() && ctx->GetWindow()->GetGui()) {
+        ctx->GetWindow()->GetGui()->HandleWindowEvents(event_impl);
+    }
     std::tuple<HMONITOR, RECT, BOOL> newMonitor;
     GfxWindowBackendDXGI* self = reinterpret_cast<GfxWindowBackendDXGI*>(GetWindowLongPtr(h_wnd, GWLP_USERDATA));
     switch (message) {
@@ -502,11 +509,20 @@ static LRESULT CALLBACK gfx_dxgi_wnd_proc(HWND h_wnd, UINT message, WPARAM w_par
             break;
         case WM_SETFOCUS:
             self->mInFocus = true;
+            if (ctx != nullptr && ctx->GetControlDeck() != nullptr) {
+                ctx->GetControlDeck()->UnblockGameInput(ALLOW_BACKGROUND_INPUTS_BLOCK_ID);
+            }
             if (self->mIsMouseCaptured) {
                 self->ApplyMouseCaptureClip();
             }
             break;
         case WM_KILLFOCUS:
+            // There is no SDL window here for SDL to gate controller input on, so block game input while unfocused
+            // unless the player allows background input.
+            if (ctx != nullptr && ctx->GetControlDeck() != nullptr && ctx->GetConsoleVariables() != nullptr &&
+                !ctx->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
+                ctx->GetControlDeck()->BlockGameInput(ALLOW_BACKGROUND_INPUTS_BLOCK_ID);
+            }
             self->mInFocus = false;
             break;
         default:
@@ -960,7 +976,7 @@ void GfxWindowBackendDXGI::SwapBuffersEnd() {
 
     QueryPerformanceCounter(&t2);
 
-    mZeroLatency = mPendingFrameStats.rbegin()->first == stats.PresentCount;
+    mZeroLatency = !mPendingFrameStats.empty() && mPendingFrameStats.rbegin()->first == stats.PresentCount;
 
     // printf(L"done %I64u gpu:%d wait:%d freed:%I64u frame:%u %u monitor:%u t:%I64u\n", (unsigned long
     // long)(t0.QuadPart - qpc_init), (int)(t1.QuadPart - t0.QuadPart), (int)(t2.QuadPart - t0.QuadPart), (unsigned

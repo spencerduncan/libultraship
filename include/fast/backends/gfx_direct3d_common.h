@@ -155,7 +155,7 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
 
     std::vector<struct TextureData> mTextures;
     int mCurrentTile;
-    uint32_t mCurrentTextureIds[SHADER_MAX_TEXTURES];
+    uint32_t mCurrentTextureIds[SHADER_MAX_TEXTURES] = {};
 
     std::vector<FramebufferDX11> mFrameBuffers;
 
@@ -163,8 +163,8 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
 
     struct ShaderProgramD3D11* mShaderProgram;
 
-    // uint32_t current_width, current_height;
-    uint32_t mRenderTargetHeight;
+    // Signed so SetViewport and SetScissor can place a rectangle that extends above the top of the target.
+    int32_t mRenderTargetHeight;
     int mCurrentFramebuffer;
     FilteringMode mCurrentFilterMode = FILTER_NONE;
 
